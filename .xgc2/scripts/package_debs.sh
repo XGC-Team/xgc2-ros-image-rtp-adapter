@@ -43,42 +43,45 @@ trap 'rm -rf "${PKG_ROOT}"' EXIT
 mkdir -p "${OUTPUT_DIR}" "${PKG_ROOT}/DEBIAN" "${PKG_ROOT}/usr/share/doc/${PACKAGE}"
 rm -f "${OUTPUT_DIR}"/${PACKAGE}_*.deb
 
-if [[ ! -d "${PREFIX_ROOT}/share/${ROS_PACKAGE}" && ! -d "${PREFIX_ROOT}/lib/${ROS_PACKAGE}" ]]; then
-  echo "staged package missing under ${PREFIX_ROOT}" >&2
-  find "${PREFIX_ROOT}" -maxdepth 3 -type d 2>/dev/null | head -50 || true
+if [[ ! -d "${PREFIX_ROOT}" ]]; then
+  echo "install root missing: ${PREFIX_ROOT}" >&2
   exit 1
 fi
 
+# Copy the full staged ROS prefix install for this package (ament_python layout).
 mkdir -p "${PKG_ROOT}${PREFIX}"
-# Copy entire ROS prefix install for this package tree.
-if [[ -d "${PREFIX_ROOT}/share/${ROS_PACKAGE}" ]]; then
-  mkdir -p "${PKG_ROOT}${PREFIX}/share"
-  cp -a "${PREFIX_ROOT}/share/${ROS_PACKAGE}" "${PKG_ROOT}${PREFIX}/share/"
-fi
-if [[ -d "${PREFIX_ROOT}/lib/${ROS_PACKAGE}" ]]; then
-  mkdir -p "${PKG_ROOT}${PREFIX}/lib"
-  cp -a "${PREFIX_ROOT}/lib/${ROS_PACKAGE}" "${PKG_ROOT}${PREFIX}/lib/"
-fi
-if [[ -d "${PREFIX_ROOT}/lib/python3" ]]; then
-  mkdir -p "${PKG_ROOT}${PREFIX}/lib"
-  cp -a "${PREFIX_ROOT}/lib/python3" "${PKG_ROOT}${PREFIX}/lib/" 2>/dev/null || true
-fi
-# ament index
-AMENT_RESOURCE_ROOT="${PREFIX_ROOT}/share/ament_index/resource_index"
-if [[ -d "${AMENT_RESOURCE_ROOT}" ]]; then
-  while IFS= read -r -d '' resource; do
-    relative="${resource#${INSTALL_ROOT}}"
-    mkdir -p "${PKG_ROOT}$(dirname "${relative}")"
-    cp -a "${resource}" "${PKG_ROOT}${relative}"
-  done < <(find "${AMENT_RESOURCE_ROOT}" -type f -name "${ROS_PACKAGE}" -print0 2>/dev/null || true)
+# Prefer isolated package install; otherwise merged install tree.
+if [[ -d "${PREFIX_ROOT}/lib/${ROS_PACKAGE}" || -d "${PREFIX_ROOT}/share/${ROS_PACKAGE}" ]]; then
+  rsync -a \
+    --include "lib/" \
+    --include "lib/${ROS_PACKAGE}/***" \
+    --include "lib/python*/***" \
+    --include "share/" \
+    --include "share/${ROS_PACKAGE}/***" \
+    --include "share/ament_index/***" \
+    --include "local/***" \
+    --exclude "*" \
+    "${PREFIX_ROOT}/" "${PKG_ROOT}${PREFIX}/" || true
+  # Also full rsync of known trees if filter missed python path variants
+  [[ -d "${PREFIX_ROOT}/lib" ]] && rsync -a "${PREFIX_ROOT}/lib/" "${PKG_ROOT}${PREFIX}/lib/"
+  [[ -d "${PREFIX_ROOT}/share" ]] && rsync -a "${PREFIX_ROOT}/share/" "${PKG_ROOT}${PREFIX}/share/"
+else
+  rsync -a "${PREFIX_ROOT}/" "${PKG_ROOT}${PREFIX}/"
 fi
 
-# Also copy local site-packages layout if present
-if [[ -d "${PREFIX_ROOT}/local" ]]; then
-  cp -a "${PREFIX_ROOT}/local" "${PKG_ROOT}${PREFIX}/" 2>/dev/null || true
+# Sanity: must ship the entrypoint and at least one python module.
+if ! find "${PKG_ROOT}${PREFIX}" -type f -name 'image_rtp_adapter' | grep -q .; then
+  echo "entrypoint image_rtp_adapter missing from staged package" >&2
+  find "${PKG_ROOT}${PREFIX}" | head -80 >&2 || true
+  exit 1
+fi
+if ! find "${PKG_ROOT}${PREFIX}" -type f -name 'node.py' | grep -q .; then
+  echo "python module node.py missing from staged package" >&2
+  find "${PKG_ROOT}${PREFIX}" | head -80 >&2 || true
+  exit 1
 fi
 
-DEPENDS="ros-${ROS_DISTRO}-rclpy, ros-${ROS_DISTRO}-sensor-msgs, ros-${ROS_DISTRO}-std-msgs, ros-${ROS_DISTRO}-launch, ros-${ROS_DISTRO}-launch-ros, ffmpeg, python3-numpy"
+DEPENDS="ros-${ROS_DISTRO}-rclpy, ros-${ROS_DISTRO}-sensor-msgs, ros-${ROS_DISTRO}-std-msgs, ros-${ROS_DISTRO}-launch, ros-${ROS_DISTRO}-launch-ros, ffmpeg, python3-numpy, python3-pil"
 
 cat >"${PKG_ROOT}/DEBIAN/control" <<EOF
 Package: ${PACKAGE}
@@ -96,11 +99,19 @@ EOF
 printf '%s\n' "${PACKAGE}" >"${PKG_ROOT}/usr/share/doc/${PACKAGE}/README"
 find "${PKG_ROOT}" -type d -exec chmod 0755 {} +
 find "${PKG_ROOT}" -type f -exec chmod 0644 {} +
-# executables
 if [[ -d "${PKG_ROOT}${PREFIX}/lib/${ROS_PACKAGE}" ]]; then
   find "${PKG_ROOT}${PREFIX}/lib/${ROS_PACKAGE}" -type f -exec chmod 0755 {} +
 fi
 chmod 0755 "${PKG_ROOT}/DEBIAN"
 
 fakeroot dpkg-deb --build "${PKG_ROOT}" "${OUTPUT_DIR}/${PACKAGE}_${VERSION}_${ARCH}.deb" >/dev/null
+DEB="$(find "${OUTPUT_DIR}" -maxdepth 1 -type f -name "${PACKAGE}_*.deb" | sort | tail -1)"
+echo "built ${DEB} ($(stat -c%s "${DEB}") bytes)"
+# Fail closed on empty-ish packages.
+size="$(stat -c%s "${DEB}")"
+if (( size < 20000 )); then
+  echo "deb package too small (${size} bytes); install layout incomplete" >&2
+  dpkg-deb -c "${DEB}" | head -100 >&2 || true
+  exit 1
+fi
 find "${OUTPUT_DIR}" -maxdepth 1 -type f -name "${PACKAGE}_*.deb" -print | sort

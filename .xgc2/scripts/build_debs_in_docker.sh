@@ -13,7 +13,7 @@ INSTALL_CHECK="${INSTALL_CHECK:-true}"
 EXPECTED_ARCH="${EXPECTED_ARCH:-}"
 RUN_INTEGRATION="${RUN_INTEGRATION:-true}"
 MEDIA_EDGE_URL="${MEDIA_EDGE_URL:-https://github.com/lxk36/xgc2-media-edge.git}"
-MEDIA_EDGE_REF="${MEDIA_EDGE_REF:-master}"
+MEDIA_EDGE_REF="${MEDIA_EDGE_REF:-main}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -60,15 +60,18 @@ docker run --rm \
       "ros-${ROS_DISTRO}-launch" "ros-${ROS_DISTRO}-launch-ros" "ros-${ROS_DISTRO}-ros2pkg" \
       "ros-${ROS_DISTRO}-ament-cmake" || true
 
-    # Go for media-edge integration
-    if ! command -v go >/dev/null; then
-      apt-get install -y --no-install-recommends golang-go || {
-        curl -fsSL https://go.dev/dl/go1.22.10.linux-$(dpkg --print-architecture).tar.gz -o /tmp/go.tgz
-        tar -C /usr/local -xzf /tmp/go.tgz
-        export PATH="/usr/local/go/bin:${PATH}"
-      }
-    fi
+    # media-edge requires a recent Go toolchain (module go 1.22+).
+    arch="$(dpkg --print-architecture)"
+    case "${arch}" in
+      amd64) go_arch=amd64 ;;
+      arm64) go_arch=arm64 ;;
+      *) go_arch="${arch}" ;;
+    esac
+    curl -fsSL "https://go.dev/dl/go1.22.10.linux-${go_arch}.tar.gz" -o /tmp/go.tgz
+    rm -rf /usr/local/go
+    tar -C /usr/local -xzf /tmp/go.tgz
     export PATH="/usr/local/go/bin:${PATH:-/usr/bin}"
+    go version
 
     rm -rf /workspace/work/build /workspace/work/install /workspace/work/log /workspace/work/src /workspace/work/install-root
     mkdir -p /workspace/work/src
@@ -115,14 +118,15 @@ docker run --rm \
     fi
 
     if [[ "${RUN_INTEGRATION}" == "true" ]]; then
-      echo "cloning media-edge for integration"
+      echo "cloning media-edge for integration (ref=${MEDIA_EDGE_REF})"
       rm -rf /workspace/work/media-edge
-      git clone --depth 1 --branch "${MEDIA_EDGE_REF}" "${MEDIA_EDGE_URL}" /workspace/work/media-edge || \
-        git clone --depth 1 "${MEDIA_EDGE_URL}" /workspace/work/media-edge
+      git clone --depth 1 --branch "${MEDIA_EDGE_REF}" "${MEDIA_EDGE_URL}" /workspace/work/media-edge
       export MEDIA_EDGE_DIR=/workspace/work/media-edge
       export WORKSPACE_INSTALL=/workspace/work/install
-      chmod +x /workspace/repo/scripts/integration_media_edge.sh
-      ROS_DISTRO="${ROS_DISTRO}" /workspace/repo/scripts/integration_media_edge.sh
+      # repo is mounted read-only; copy scripts into the writable workdir
+      cp -a /workspace/repo/scripts /workspace/work/integration-scripts
+      chmod +x /workspace/work/integration-scripts/*.sh /workspace/work/integration-scripts/*.py || true
+      ROS_DISTRO="${ROS_DISTRO}" /workspace/work/integration-scripts/integration_media_edge.sh
     fi
   '
 
