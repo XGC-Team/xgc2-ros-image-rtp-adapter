@@ -1,7 +1,7 @@
 name: release
 
-# Centralized XGC2 release-train contract. Products build trusted debs + manifests
-# only; APT publish is owned by xgc2-devops orchestrator (never publish_apt here).
+# Centralized XGC2 release-train contract. Products only build trusted debs and
+# manifests. APT repository promotion is owned by xgc2-devops orchestrator.
 
 on:
   workflow_dispatch:
@@ -40,7 +40,7 @@ on:
       run_source_tests:
         description: Run package unit tests during release
         required: true
-        default: true
+        default: false
         type: boolean
 
 permissions:

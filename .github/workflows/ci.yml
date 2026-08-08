@@ -17,39 +17,44 @@ defaults:
     shell: bash
 
 jobs:
+  # Pure quality gates run in parallel with matrix builds (release-train contract).
   compliance:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
       - name: Compliance
         run: |
           set -euo pipefail
-          chmod +x .xgc2/scripts/*.sh scripts/*.sh
+          chmod +x .xgc2/scripts/*.sh scripts/*.sh scripts/*.py || true
+          git diff --check HEAD
           .xgc2/scripts/check_package_compliance.sh
 
   matrix:
     name: ${{ matrix.ros_distro }}-${{ matrix.ubuntu }}-${{ matrix.arch }}
-    needs: compliance
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Ubuntu 24.04 + Jazzy (Thor / production target)
           - ros_distro: jazzy
             ubuntu: noble
+            distribution: noble
             arch: amd64
             runner: ubuntu-24.04
           - ros_distro: jazzy
             ubuntu: noble
+            distribution: noble
             arch: arm64
             runner: ubuntu-24.04-arm
-          # Ubuntu 22.04 + Humble
           - ros_distro: humble
             ubuntu: jammy
+            distribution: jammy
             arch: amd64
             runner: ubuntu-24.04
           - ros_distro: humble
             ubuntu: jammy
+            distribution: jammy
             arch: arm64
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
@@ -63,25 +68,37 @@ jobs:
           EXPECTED_ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
-          chmod +x .xgc2/scripts/*.sh scripts/*.sh
-          # On arm runners, arch must match host (no qemu cross for this product).
+          chmod +x .xgc2/scripts/*.sh scripts/*.sh scripts/*.py || true
           host_arch="$(dpkg --print-architecture)"
-          if [[ "${host_arch}" != "${EXPECTED_ARCH}" ]]; then
-            echo "skip mismatched host arch ${host_arch} vs ${EXPECTED_ARCH}"
-            # GitHub ubuntu-24.04 is amd64; arm job uses ubuntu-24.04-arm.
-            if [[ "${EXPECTED_ARCH}" == "arm64" && "${host_arch}" == "amd64" ]]; then
-              exit 1
-            fi
-          fi
+          test "${host_arch}" = "${EXPECTED_ARCH}"
           .xgc2/scripts/build_debs_in_docker.sh \
             --ros-distro "${ROS_DISTRO}" \
             --ubuntu "${UBUNTU_CODENAME}" \
             --work-dir "$RUNNER_TEMP/work-${ROS_DISTRO}-${EXPECTED_ARCH}" \
             --output-dir "$GITHUB_WORKSPACE/debs"
 
+      - name: Create trusted build manifest
+        run: |
+          set -euo pipefail
+          product_version="$(awk -F': *' '/^version:[[:space:]]*/ {print $2; exit}' .xgc2/product.yml)"
+          python3 .xgc2/scripts/xgc2_artifact_manifest.py build \
+            --deb-dir debs \
+            --output-dir .ci/build-manifests \
+            --product xgc2-ros-image-rtp-adapter \
+            --product-version "$product_version" \
+            --distribution "${{ matrix.distribution }}" \
+            --architecture "${{ matrix.arch }}" \
+            --source-sha "$GITHUB_SHA" \
+            --ci-run-id "$GITHUB_RUN_ID" \
+            --ci-workflow "$GITHUB_WORKFLOW" \
+            --ci-workflow-ref "$GITHUB_WORKFLOW_REF"
+
       - name: Upload deb artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ros-${{ matrix.ros_distro }}-xgc2-ros-image-rtp-adapter-${{ matrix.arch }}
-          path: debs/*.deb
+          name: xgc2-ros-image-rtp-adapter-${{ matrix.distribution }}-${{ matrix.arch }}
+          path: |
+            debs/*.deb
+            .ci/build-manifests/*.json
           retention-days: 14
+          include-hidden-files: true
