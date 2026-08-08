@@ -1,0 +1,55 @@
+schema: xgc2.product.v1
+id: xgc2-ros-jazzy-ros-image-rtp-adapter
+name: XGC2 ROS Image RTP Adapter for ROS Jazzy
+version: 0.1.0
+kind: ros2-apt
+summary: >-
+  Parameterized ROS 2 CompressedImage (JPEG) to H264/RTP adapter that implements
+  the xgc2-media-edge source control contract. Topic names and source IDs are
+  launch parameters; not hard-coded to a camera brand.
+groups:
+- ros2
+- driver
+- media
+ros:
+  distro: jazzy
+  packages:
+  - ros_image_rtp_adapter
+apt:
+  distribution: noble
+  install:
+  - ros-jazzy-xgc2-ros-image-rtp-adapter
+  packages:
+  - ros-jazzy-xgc2-ros-image-rtp-adapter
+  package_architectures:
+    ros-jazzy-xgc2-ros-image-rtp-adapter:
+    - amd64
+    - arm64
+  depends:
+  - ros-jazzy-rclpy
+  - ros-jazzy-sensor-msgs
+  - ros-jazzy-std-msgs
+  - ros-jazzy-launch
+  - ros-jazzy-launch-ros
+  - ffmpeg
+  - python3-numpy
+usage:
+  install: |
+    sudo apt update
+    sudo apt install ros-jazzy-xgc2-ros-image-rtp-adapter
+  smoke_test: |
+    ros2 pkg prefix ros_image_rtp_adapter
+    test -x /opt/ros/jazzy/lib/ros_image_rtp_adapter/image_rtp_adapter
+    test -f /opt/ros/jazzy/share/ros_image_rtp_adapter/launch/image_rtp_adapter.launch.py
+ownership:
+  paths:
+  - /opt/ros/jazzy/lib/ros_image_rtp_adapter
+  - /opt/ros/jazzy/share/ros_image_rtp_adapter
+  - /opt/ros/jazzy/share/ament_index/resource_index/packages/ros_image_rtp_adapter
+release:
+  repository: lxk36/xgc2-ros-image-rtp-adapter
+  ref: jazzy
+  workflow: release.yml
+  ci_workflow: ci.yml
+  apt_versions:
+    noble: 0.1.0

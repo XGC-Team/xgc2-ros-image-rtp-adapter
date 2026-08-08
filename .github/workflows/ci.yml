@@ -1,0 +1,87 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: xgc2-ros-image-rtp-adapter-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  compliance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compliance
+        run: |
+          set -euo pipefail
+          chmod +x .xgc2/scripts/*.sh scripts/*.sh
+          .xgc2/scripts/check_package_compliance.sh
+
+  matrix:
+    name: ${{ matrix.ros_distro }}-${{ matrix.ubuntu }}-${{ matrix.arch }}
+    needs: compliance
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Ubuntu 24.04 + Jazzy (Thor / production target)
+          - ros_distro: jazzy
+            ubuntu: noble
+            arch: amd64
+            runner: ubuntu-24.04
+          - ros_distro: jazzy
+            ubuntu: noble
+            arch: arm64
+            runner: ubuntu-24.04-arm
+          # Ubuntu 22.04 + Humble
+          - ros_distro: humble
+            ubuntu: jammy
+            arch: amd64
+            runner: ubuntu-24.04
+          - ros_distro: humble
+            ubuntu: jammy
+            arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build deb + install-check + media-edge integration
+        env:
+          ROS_DISTRO: ${{ matrix.ros_distro }}
+          UBUNTU_CODENAME: ${{ matrix.ubuntu }}
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          chmod +x .xgc2/scripts/*.sh scripts/*.sh
+          # On arm runners, arch must match host (no qemu cross for this product).
+          host_arch="$(dpkg --print-architecture)"
+          if [[ "${host_arch}" != "${EXPECTED_ARCH}" ]]; then
+            echo "skip mismatched host arch ${host_arch} vs ${EXPECTED_ARCH}"
+            # GitHub ubuntu-24.04 is amd64; arm job uses ubuntu-24.04-arm.
+            if [[ "${EXPECTED_ARCH}" == "arm64" && "${host_arch}" == "amd64" ]]; then
+              exit 1
+            fi
+          fi
+          .xgc2/scripts/build_debs_in_docker.sh \
+            --ros-distro "${ROS_DISTRO}" \
+            --ubuntu "${UBUNTU_CODENAME}" \
+            --work-dir "$RUNNER_TEMP/work-${ROS_DISTRO}-${EXPECTED_ARCH}" \
+            --output-dir "$GITHUB_WORKSPACE/debs"
+
+      - name: Upload deb artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ros-${{ matrix.ros_distro }}-xgc2-ros-image-rtp-adapter-${{ matrix.arch }}
+          path: debs/*.deb
+          retention-days: 14

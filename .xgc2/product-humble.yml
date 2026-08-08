@@ -1,0 +1,53 @@
+schema: xgc2.product.v1
+id: xgc2-ros-humble-ros-image-rtp-adapter
+name: XGC2 ROS Image RTP Adapter for ROS Humble
+version: 0.1.0
+kind: ros2-apt
+summary: >-
+  Parameterized ROS 2 CompressedImage (JPEG) to H264/RTP adapter (Humble/Jammy)
+  for xgc2-media-edge.
+groups:
+- ros2
+- driver
+- media
+ros:
+  distro: humble
+  packages:
+  - ros_image_rtp_adapter
+apt:
+  distribution: jammy
+  install:
+  - ros-humble-xgc2-ros-image-rtp-adapter
+  packages:
+  - ros-humble-xgc2-ros-image-rtp-adapter
+  package_architectures:
+    ros-humble-xgc2-ros-image-rtp-adapter:
+    - amd64
+    - arm64
+  depends:
+  - ros-humble-rclpy
+  - ros-humble-sensor-msgs
+  - ros-humble-std-msgs
+  - ros-humble-launch
+  - ros-humble-launch-ros
+  - ffmpeg
+  - python3-numpy
+usage:
+  install: |
+    sudo apt update
+    sudo apt install ros-humble-xgc2-ros-image-rtp-adapter
+  smoke_test: |
+    ros2 pkg prefix ros_image_rtp_adapter
+    test -x /opt/ros/humble/lib/ros_image_rtp_adapter/image_rtp_adapter
+ownership:
+  paths:
+  - /opt/ros/humble/lib/ros_image_rtp_adapter
+  - /opt/ros/humble/share/ros_image_rtp_adapter
+  - /opt/ros/humble/share/ament_index/resource_index/packages/ros_image_rtp_adapter
+release:
+  repository: lxk36/xgc2-ros-image-rtp-adapter
+  ref: humble
+  workflow: release.yml
+  ci_workflow: ci.yml
+  apt_versions:
+    jammy: 0.1.0

@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>ros_image_rtp_adapter</name>
+  <version>0.1.0</version>
+  <description>
+    Parameterized ROS CompressedImage (JPEG) to H264/RTP adapter that conforms to
+    the xgc2-media-edge source control contract. Topic names are launch/CLI
+    parameters — not hard-coded to any camera brand.
+  </description>
+
+  <maintainer email="apt@xgc2.local">XGC2</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+
+  <!-- JPEG decode + H264 encode toolchain (soft encode path). -->
+  <exec_depend>ffmpeg</exec_depend>
+  <exec_depend>libavcodec-extra</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

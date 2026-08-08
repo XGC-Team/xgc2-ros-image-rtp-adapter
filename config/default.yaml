@@ -1,0 +1,22 @@
+# Example parameters only — nothing is brand-specific.
+# Override at launch:
+#   ros2 launch ros_image_rtp_adapter image_rtp_adapter.launch.py \
+#     image_topic:=/odin1/image/compressed source_id:=odin1
+
+image_rtp_adapter:
+  ros__parameters:
+    image_topic: /camera/image_raw/compressed
+    image_transport_hint: compressed
+    source_id: camera
+    frame_id: camera_optical
+    rtp_host: 127.0.0.1
+    rtp_port: 5004
+    control_socket: /tmp/xgc2-image-rtp-adapter.sock
+    width: 1280
+    height: 720
+    fps: 15.0
+    bitrate: 2500000
+    encoder: libx264
+    ffmpeg_path: ffmpeg
+    drop_to_latest: true
+    require_jpeg: true

@@ -1,0 +1,77 @@
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_version:
+        description: Expected product version
+        required: true
+        type: string
+      expected_source_sha:
+        description: Expected source commit SHA
+        required: true
+        type: string
+      ros_distro:
+        description: ROS distro to package
+        required: true
+        default: jazzy
+        type: choice
+        options:
+          - jazzy
+          - humble
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate version and SHA
+        run: |
+          set -euo pipefail
+          product=".xgc2/product.yml"
+          if [[ "${{ inputs.ros_distro }}" == "humble" ]]; then
+            product=".xgc2/product-humble.yml"
+          fi
+          version="$(awk -F': *' '/^version:[[:space:]]*/ {print $2; exit}' "$product")"
+          test "${version}" = "${{ inputs.expected_version }}"
+          test "$(git rev-parse HEAD)" = "${{ inputs.expected_source_sha }}"
+          chmod +x .xgc2/scripts/*.sh scripts/*.sh
+          .xgc2/scripts/check_package_compliance.sh
+
+  build:
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build release debs
+        run: |
+          set -euo pipefail
+          chmod +x .xgc2/scripts/*.sh scripts/*.sh
+          ubuntu=noble
+          if [[ "${{ inputs.ros_distro }}" == "humble" ]]; then
+            ubuntu=jammy
+          fi
+          .xgc2/scripts/build_debs_in_docker.sh \
+            --ros-distro "${{ inputs.ros_distro }}" \
+            --ubuntu "${ubuntu}" \
+            --work-dir "$RUNNER_TEMP/rel" \
+            --output-dir "$GITHUB_WORKSPACE/debs"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ inputs.ros_distro }}-${{ matrix.arch }}
+          path: debs/*.deb
