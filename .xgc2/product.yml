@@ -39,6 +39,10 @@ apt:
   - ffmpeg
   - python3-numpy
   - python3-pil
+  # Soft co-install with the Edge data plane. The adapter is a pure RTP source
+  # and does not hard-Depends on media-edge at package install time.
+  recommends:
+  - xgc2-media-edge
 usage:
   install: |
     # Thor / Ubuntu 24.04 + Jazzy
@@ -61,6 +65,13 @@ release:
   ref: jazzy
   workflow: release.yml
   ci_workflow: ci.yml
+  # Integration scripts and CI clone/run xgc2-media-edge. Declare the product
+  # edge so the release train can order media-edge before this adapter without
+  # forcing a rebuild when Edge changes (contract is interface-stable).
+  requires:
+  - xgc2-media-edge
+  dependency_policy:
+    xgc2-media-edge: order
   apt_versions:
     jammy: 0.1.0
     noble: 0.1.0

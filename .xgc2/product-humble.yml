@@ -32,6 +32,8 @@ apt:
   - ros-humble-launch-ros
   - ffmpeg
   - python3-numpy
+  recommends:
+  - xgc2-media-edge
 usage:
   install: |
     sudo apt update
@@ -49,5 +51,9 @@ release:
   ref: humble
   workflow: release.yml
   ci_workflow: ci.yml
+  requires:
+  - xgc2-media-edge
+  dependency_policy:
+    xgc2-media-edge: order
   apt_versions:
     jammy: 0.1.0
