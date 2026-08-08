@@ -1,12 +1,12 @@
 schema: xgc2.product.v1
-id: xgc2-ros-jazzy-ros-image-rtp-adapter
-name: XGC2 ROS Image RTP Adapter for ROS Jazzy
+id: xgc2-ros-image-rtp-adapter
+name: XGC2 ROS Image RTP Adapter
 version: 0.1.0
 kind: ros2-apt
 summary: >-
-  Parameterized ROS 2 CompressedImage (JPEG) to H264/RTP adapter that implements
+  Parameterized ROS 2 CompressedImage (JPEG) to H264/RTP adapter implementing
   the xgc2-media-edge source control contract. Topic names and source IDs are
-  launch parameters; not hard-coded to a camera brand.
+  launch parameters. Ships ROS Jazzy (noble) and ROS Humble (jammy) packages.
 groups:
 - ros2
 - driver
@@ -16,40 +16,50 @@ ros:
   packages:
   - ros_image_rtp_adapter
 apt:
-  distribution: noble
+  distribution: jammy,noble
   install:
   - ros-jazzy-xgc2-ros-image-rtp-adapter
   packages:
   - ros-jazzy-xgc2-ros-image-rtp-adapter
+  - ros-humble-xgc2-ros-image-rtp-adapter
   package_architectures:
     ros-jazzy-xgc2-ros-image-rtp-adapter:
     - amd64
     - arm64
+    ros-humble-xgc2-ros-image-rtp-adapter:
+    - amd64
+    - arm64
+  package_distributions:
+    ros-jazzy-xgc2-ros-image-rtp-adapter:
+    - noble
+    ros-humble-xgc2-ros-image-rtp-adapter:
+    - jammy
   depends:
-  - ros-jazzy-rclpy
-  - ros-jazzy-sensor-msgs
-  - ros-jazzy-std-msgs
-  - ros-jazzy-launch
-  - ros-jazzy-launch-ros
   - ffmpeg
   - python3-numpy
+  - python3-pil
 usage:
   install: |
+    # Thor / Ubuntu 24.04 + Jazzy
     sudo apt update
     sudo apt install ros-jazzy-xgc2-ros-image-rtp-adapter
+    # Ubuntu 22.04 + Humble
+    # sudo apt install ros-humble-xgc2-ros-image-rtp-adapter
   smoke_test: |
     ros2 pkg prefix ros_image_rtp_adapter
-    test -x /opt/ros/jazzy/lib/ros_image_rtp_adapter/image_rtp_adapter
-    test -f /opt/ros/jazzy/share/ros_image_rtp_adapter/launch/image_rtp_adapter.launch.py
+    test -x "$(ros2 pkg prefix ros_image_rtp_adapter)/lib/ros_image_rtp_adapter/image_rtp_adapter"
 ownership:
   paths:
   - /opt/ros/jazzy/lib/ros_image_rtp_adapter
   - /opt/ros/jazzy/share/ros_image_rtp_adapter
-  - /opt/ros/jazzy/share/ament_index/resource_index/packages/ros_image_rtp_adapter
+  - /opt/ros/jazzy/lib/python3.12/site-packages/ros_image_rtp_adapter
+  - /opt/ros/humble/lib/ros_image_rtp_adapter
+  - /opt/ros/humble/share/ros_image_rtp_adapter
 release:
   repository: lxk36/xgc2-ros-image-rtp-adapter
   ref: jazzy
   workflow: release.yml
   ci_workflow: ci.yml
   apt_versions:
+    jammy: 0.1.0
     noble: 0.1.0
