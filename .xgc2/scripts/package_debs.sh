@@ -109,7 +109,8 @@ DEB="$(find "${OUTPUT_DIR}" -maxdepth 1 -type f -name "${PACKAGE}_*.deb" | sort 
 echo "built ${DEB} ($(stat -c%s "${DEB}") bytes)"
 # Fail closed on empty-ish packages.
 size="$(stat -c%s "${DEB}")"
-if (( size < 20000 )); then
+# Pure-Python ament package is intentionally small; require a real layout, not empty shell.
+if (( size < 8000 )); then
   echo "deb package too small (${size} bytes); install layout incomplete" >&2
   dpkg-deb -c "${DEB}" | head -100 >&2 || true
   exit 1
