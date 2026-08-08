@@ -68,10 +68,8 @@ log "building media-edge from ${MEDIA_EDGE_DIR}"
 )
 
 log "starting test JPEG publisher on ${IMAGE_TOPIC}"
+# Args before --ros-args so publish_test_jpeg argparse receives them.
 ros2 run ros_image_rtp_adapter publish_test_jpeg \
-  --ros-args \
-  -p use_sim_time:=false \
-  -- \
   --topic "${IMAGE_TOPIC}" --width "${WIDTH}" --height "${HEIGHT}" --fps "${FPS}" \
   >"${WORK}/publisher.log" 2>&1 &
 PUB_PID=$!
@@ -86,7 +84,7 @@ ros2 run ros_image_rtp_adapter image_rtp_adapter --ros-args \
   -p control_socket:="${CONTROL_SOCKET}" \
   -p width:="${WIDTH}" \
   -p height:="${HEIGHT}" \
-  -p fps:="${FPS}" \
+  -p fps:="${FPS}.0" \
   -p bitrate:=1500000 \
   -p encoder:=libx264 \
   -p ffmpeg_path:=ffmpeg \

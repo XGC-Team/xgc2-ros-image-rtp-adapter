@@ -32,18 +32,19 @@ class ImageRtpAdapterNode(Node):
         self.declare_parameter("drop_to_latest", True)
         self.declare_parameter("require_jpeg", True)
 
-        self._image_topic = self.get_parameter("image_topic").get_parameter_value().string_value
-        self._source_id = self.get_parameter("source_id").get_parameter_value().string_value
-        self._frame_id = self.get_parameter("frame_id").get_parameter_value().string_value
-        self._rtp_host = self.get_parameter("rtp_host").get_parameter_value().string_value
+        self._image_topic = str(self.get_parameter("image_topic").value)
+        self._source_id = str(self.get_parameter("source_id").value)
+        self._frame_id = str(self.get_parameter("frame_id").value)
+        self._rtp_host = str(self.get_parameter("rtp_host").value)
         self._rtp_port = int(self.get_parameter("rtp_port").value)
-        self._control_socket = self.get_parameter("control_socket").get_parameter_value().string_value
+        self._control_socket = str(self.get_parameter("control_socket").value)
         self._width = int(self.get_parameter("width").value)
         self._height = int(self.get_parameter("height").value)
+        # CLI often passes fps as an integer; accept both int and float.
         self._fps = float(self.get_parameter("fps").value)
         self._bitrate = int(self.get_parameter("bitrate").value)
-        self._encoder = self.get_parameter("encoder").get_parameter_value().string_value
-        self._ffmpeg_path = self.get_parameter("ffmpeg_path").get_parameter_value().string_value
+        self._encoder = str(self.get_parameter("encoder").value)
+        self._ffmpeg_path = str(self.get_parameter("ffmpeg_path").value)
         self._drop_to_latest = bool(self.get_parameter("drop_to_latest").value)
         self._require_jpeg = bool(self.get_parameter("require_jpeg").value)
 
