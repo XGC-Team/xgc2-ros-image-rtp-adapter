@@ -2,7 +2,7 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>ros_image_rtp_adapter</name>
-  <version>0.1.0</version>
+  <version>0.1.1</version>
   <description>
     Parameterized ROS CompressedImage (JPEG) to H264/RTP adapter that conforms to
     the xgc2-media-edge source control contract. Topic names are launch/CLI

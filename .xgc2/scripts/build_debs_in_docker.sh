@@ -86,8 +86,10 @@ docker run --rm \
     source install/setup.bash
     set -u
 
-    # unit tests (control socket, no ROS daemon required for pure unit)
-    python3 -m pytest /workspace/work/src/ros_image_rtp_adapter/test/test_control_socket.py -q
+    # Pure unit tests: source-control contract and RTP producer continuity.
+    python3 -m pytest \
+      /workspace/work/src/ros_image_rtp_adapter/test/test_control_socket.py \
+      /workspace/work/src/ros_image_rtp_adapter/test/test_encoder.py -q
 
     # Stage install for deb
     mkdir -p /workspace/work/install-root

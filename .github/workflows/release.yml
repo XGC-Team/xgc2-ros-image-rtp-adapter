@@ -129,11 +129,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Unit tests (control socket)
+      - name: Unit tests (control socket and RTP continuity)
         run: |
           set -euo pipefail
           python3 -m pip install --user pytest
-          PYTHONPATH=. python3 -m pytest test/test_control_socket.py -q
+          PYTHONPATH=. python3 -m pytest test/test_control_socket.py test/test_encoder.py -q
 
   # Matrix: Ubuntu 22.04/24.04 × amd64/arm64  →  humble/jazzy debs
   build-debs:

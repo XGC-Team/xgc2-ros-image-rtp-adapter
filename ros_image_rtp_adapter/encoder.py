@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import signal
 import subprocess
 import threading
@@ -37,7 +36,6 @@ class FFmpegJpegRtpEncoder:
         self._encoder = encoder
         self._proc: Optional[subprocess.Popen] = None
         self._lock = threading.Lock()
-        self._force_keyframe = False
 
     def start(self) -> None:
         with self._lock:
@@ -79,13 +77,6 @@ class FFmpegJpegRtpEncoder:
             proc = self._proc
             if proc is None or proc.stdin is None:
                 return
-            if self._force_keyframe:
-                # Soft path: restart encoder so the next AU is IDR-capable.
-                self._force_keyframe = False
-                self._restart_locked()
-                proc = self._proc
-                if proc is None or proc.stdin is None:
-                    return
             try:
                 proc.stdin.write(jpeg)
                 proc.stdin.flush()
@@ -93,8 +84,13 @@ class FFmpegJpegRtpEncoder:
                 self._restart_locked()
 
     def request_keyframe(self) -> None:
-        with self._lock:
-            self._force_keyframe = True
+        # ffmpeg's stdin-driven soft encoder has no safe per-frame force-IDR
+        # control. Restarting ffmpeg here changes the RTP producer clock/SSRC
+        # while a WebRTC session is live and can trap the browser in a PLI ->
+        # restart loop. The command below emits an IDR with repeated SPS/PPS at
+        # least once per second, so a request is satisfied by the next bounded
+        # periodic keyframe without breaking RTP continuity.
+        return
 
     def _restart_locked(self) -> None:
         proc = self._proc
@@ -121,8 +117,8 @@ class FFmpegJpegRtpEncoder:
 
     def _build_command(self) -> List[str]:
         # image2pipe + mjpeg demux accepts concatenated JPEG frames on stdin.
-        gop = max(1, int(round(self._fps * 2)))
-        return [
+        gop = max(1, int(round(self._fps)))
+        command = [
             self._ffmpeg_path,
             "-hide_banner",
             "-loglevel",
@@ -163,12 +159,20 @@ class FFmpegJpegRtpEncoder:
             str(self._bitrate),
             "-bufsize",
             str(self._bitrate * 2),
+        ]
+        if self._encoder == "libx264":
+            command.extend([
+                "-x264-params",
+                "repeat-headers=1:scenecut=0",
+            ])
+        command.extend([
             "-f",
             "rtp",
             "-payload_type",
             "96",
             f"rtp://{self._rtp_host}:{self._rtp_port}?pkt_size=1200",
-        ]
+        ])
+        return command
 
     def _drain_stderr(self) -> None:
         proc = self._proc

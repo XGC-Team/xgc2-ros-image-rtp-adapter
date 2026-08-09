@@ -1,7 +1,7 @@
 schema: xgc2.product.v1
 id: xgc2-ros-image-rtp-adapter
 name: XGC2 ROS Image RTP Adapter
-version: 0.1.0
+version: 0.1.1
 kind: ros2-apt
 summary: >-
   Parameterized ROS 2 CompressedImage (JPEG) to H264/RTP adapter implementing
@@ -73,5 +73,5 @@ release:
   dependency_policy:
     xgc2-media-edge: order
   apt_versions:
-    jammy: 0.1.0
-    noble: 0.1.0
+    jammy: 0.1.1
+    noble: 0.1.1
