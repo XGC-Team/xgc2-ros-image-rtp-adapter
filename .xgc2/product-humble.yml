@@ -48,7 +48,7 @@ ownership:
   - /opt/ros/humble/share/ament_index/resource_index/packages/ros_image_rtp_adapter
 release:
   repository: lxk36/xgc2-ros-image-rtp-adapter
-  ref: humble
+  ref: v0.1.1
   workflow: release.yml
   ci_workflow: ci.yml
   requires:
