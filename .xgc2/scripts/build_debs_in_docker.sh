@@ -152,7 +152,10 @@ docker run --rm \
 
     if [[ "${INSTALL_CHECK}" == "true" ]]; then
       apt-get install -y /workspace/out/ros-${ROS_DISTRO}-xgc2-ros-image-rtp-adapter_*.deb
-      dpkg -L ros-${ROS_DISTRO}-xgc2-ros-image-rtp-adapter | head
+      # Do not use `head` under pipefail here: the Humble generated package file
+      # list is large enough for dpkg to receive SIGPIPE after the reader exits.
+      # sed consumes the complete list while keeping the install-check concise.
+      dpkg -L ros-${ROS_DISTRO}-xgc2-ros-image-rtp-adapter | sed -n "1,10p"
       if [[ "${ROS_DISTRO}" == "noetic" ]]; then
         bash -lc "source /opt/ros/noetic/setup.bash && rospack find ros_image_rtp_adapter"
       else
