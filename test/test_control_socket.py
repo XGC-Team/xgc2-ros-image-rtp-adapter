@@ -58,6 +58,7 @@ class ControlSocketTest(unittest.TestCase):
         )
         server.start()
         try:
+            self.assertFalse(server.active)
             desc = _request(path, {"operation": "describe"})
             self.assertTrue(desc["ok"])
             self.assertEqual(desc["sourceId"], "odin1")
@@ -72,6 +73,41 @@ class ControlSocketTest(unittest.TestCase):
 
             resp = _request(path, {"operation": "request-keyframe"})
             self.assertTrue(resp["ok"])
+
+            resp = _request(path, {"operation": "set-active", "active": "yes"})
+            self.assertFalse(resp["ok"])
+            self.assertIn("boolean", resp["error"])
+        finally:
+            server.stop()
+
+    def test_failed_activation_keeps_server_available_and_inactive(self):
+        fd, path = tempfile.mkstemp(prefix="xgc2-image-rtp-", suffix=".sock")
+        os.close(fd)
+        os.unlink(path)
+
+        def fail_activation(_active):
+            raise RuntimeError("encoder unavailable")
+
+        server = SourceControlServer(
+            path,
+            SourceDescription(
+                source_id="camera",
+                rtp_host="127.0.0.1",
+                rtp_port=5004,
+                width=640,
+                height=360,
+                fps=10.0,
+                frame_id="camera_optical",
+            ),
+            on_set_active=fail_activation,
+        )
+        server.start()
+        try:
+            response = _request(path, {"operation": "set-active", "active": True})
+            self.assertFalse(response["ok"])
+            self.assertIn("encoder unavailable", response["error"])
+            self.assertFalse(server.active)
+            self.assertTrue(_request(path, {"operation": "describe"})["ok"])
         finally:
             server.stop()
 

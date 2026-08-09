@@ -8,16 +8,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 ROS_PACKAGE="ros_image_rtp_adapter"
 
-product_file="${REPO_ROOT}/.xgc2/product.yml"
-if [[ "${ROS_DISTRO}" == "humble" && -f "${REPO_ROOT}/.xgc2/product-humble.yml" ]]; then
-  product_file="${REPO_ROOT}/.xgc2/product-humble.yml"
-fi
-
 product_version() {
   awk -F': *' '/^version:[[:space:]]*/ {print $2; exit}' "${product_file}"
 }
 
-VERSION="${PACKAGE_VERSION:-$(product_version)}"
 PACKAGE="ros-${ROS_DISTRO}-xgc2-ros-image-rtp-adapter"
 
 while [[ $# -gt 0 ]]; do
@@ -28,6 +22,14 @@ while [[ $# -gt 0 ]]; do
     *) echo "unknown argument: $1" >&2; exit 1 ;;
   esac
 done
+
+product_file="${REPO_ROOT}/.xgc2/product.yml"
+if [[ "${ROS_DISTRO}" == "humble" ]]; then
+  product_file="${REPO_ROOT}/.xgc2/product-humble.yml"
+elif [[ "${ROS_DISTRO}" == "noetic" ]]; then
+  product_file="${REPO_ROOT}/.xgc2/product-noetic.yml"
+fi
+VERSION="${PACKAGE_VERSION:-$(product_version)}"
 
 if [[ -z "${INSTALL_ROOT}" || -z "${OUTPUT_DIR}" || -z "${VERSION}" ]]; then
   echo "missing required args or version" >&2
@@ -81,7 +83,11 @@ if ! find "${PKG_ROOT}${PREFIX}" -type f -name 'node.py' | grep -q .; then
   exit 1
 fi
 
-DEPENDS="ros-${ROS_DISTRO}-rclpy, ros-${ROS_DISTRO}-sensor-msgs, ros-${ROS_DISTRO}-std-msgs, ros-${ROS_DISTRO}-launch, ros-${ROS_DISTRO}-launch-ros, ffmpeg, python3-numpy, python3-pil, gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly"
+if [[ "${ROS_DISTRO}" == "noetic" ]]; then
+  DEPENDS="ros-noetic-rospy, ros-noetic-sensor-msgs, ffmpeg, python3-pil, gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly"
+else
+  DEPENDS="ros-${ROS_DISTRO}-rclpy, ros-${ROS_DISTRO}-sensor-msgs, ros-${ROS_DISTRO}-std-msgs, ros-${ROS_DISTRO}-launch, ros-${ROS_DISTRO}-launch-ros, ffmpeg, python3-numpy, python3-pil, gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly"
+fi
 
 cat >"${PKG_ROOT}/DEBIAN/control" <<EOF
 Package: ${PACKAGE}
@@ -91,9 +97,10 @@ Priority: optional
 Architecture: ${ARCH}
 Maintainer: XGC2 <apt@xgc2.local>
 Depends: ${DEPENDS}
-Description: XGC2 ROS JPEG to media-edge H264/RTP adapter
- Parameterized bridge from sensor_msgs/CompressedImage to the xgc2-media-edge
- source contract with configurable FFmpeg or GStreamer encoder backends.
+Description: XGC2 ROS image to media-edge H264/RTP adapter
+ Parameterized bridge from sensor_msgs/Image or CompressedImage to the
+ xgc2-media-edge source contract with configurable FFmpeg or GStreamer
+ encoder backends.
 EOF
 
 printf '%s\n' "${PACKAGE}" >"${PKG_ROOT}/usr/share/doc/${PACKAGE}/README"

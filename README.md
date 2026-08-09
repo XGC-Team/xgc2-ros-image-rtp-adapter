@@ -1,190 +1,254 @@
 # xgc2-ros-image-rtp-adapter
 
-Parameterized **ROS 2** bridge from `sensor_msgs/msg/CompressedImage` (**JPEG**)
-to the **[xgc2-media-edge](https://github.com/lxk36/xgc2-media-edge)** source
-contract (**H264/RTP** on loopback + Unix control socket).
+Hardware-neutral ROS 1/ROS 2 image ingress for
+[`xgc2-media-edge`](https://github.com/lxk36/xgc2-media-edge). It converts an
+explicit `sensor_msgs/Image` or JPEG `sensor_msgs/CompressedImage` topic into
+the same local source contract used by every other XGC2 camera source:
 
-This is a **generic capability product**. It is not hard-coded to Odin, Thor,
-NVIDIA, a topic, or a device path. Any publisher that emits JPEG
-`CompressedImage` can be wired in by parameters. Encoding is an explicit
-deployment choice:
+- H264/RTP payload type 96 on a fixed loopback UDP port;
+- newline-delimited source control on an absolute Unix socket;
+- stable `sourceId`, dimensions, rate, and optical frame metadata;
+- independent `set-active`, keyframe, and snapshot operations.
 
-| Backend | Default | Intended use |
-|---------|---------|--------------|
-| `ffmpeg` | yes (`libx264`) | Portable CPU path and integration baseline |
-| `gstreamer` | opt-in | Configurable software or hardware element pipeline |
+Topic names, ROS version, message type, pixel format, encoder backend, element
+factories, and element properties are configuration. There is no Odin, B2,
+camera brand, device path, Jetson model, or topic-name branch in the runtime.
 
-There is deliberately no `auto` backend. The product never guesses hardware;
-the Session/deployment selects a reviewed profile and startup fails early when
-its requested encoder or GStreamer element is unavailable.
+## Unified media boundary
+
+This package is one replaceable ingress, not the browser server:
 
 ```text
-  [any camera driver]
-        │  sensor_msgs/CompressedImage (jpeg)
-        ▼
-  ros_image_rtp_adapter   ← this package (topic fully parameterized)
-        │  H264/RTP 127.0.0.1:<rtp_port>
-        │  Unix control socket (describe / set-active / request-keyframe / snapshot)
-        ▼
-  xgc-media-edge
-        │  WebRTC
-        ▼
-  browser / XGC2 camera-video panel
+ROS 1 Image/CompressedImage ─┐
+ROS 2 Image/CompressedImage ─┤  this adapter -> H264/RTP + Unix control
+direct camera H264/RTSP ─────┤  native repacketizer/source
+Gazebo world camera ─────────┘  native NVENC H264/RTP source
+                                      |
+                                      v
+                            one xgc-media-edge service
+                                      |
+                                      v
+                          WebRTC -> Experiment camera panel
 ```
 
-On the robot (e.g. Thor) you start **adapter + media-edge**. The ground station
-only connects to the Edge pull URL (`edgeUrl` + `sourceId`).
+The Gazebo world camera already implements the Edge source contract directly,
+so its encoded output must not be routed through ROS and re-encoded. A direct
+robot camera that already emits H264 should likewise use a bounded native
+repacketizer. Raw/JPEG camera feeds and ROS topics use this encoder adapter.
+All of them are configured as named sources in one Edge source roster and are
+controlled independently by the Experiment Session.
 
-## Branches
+## Shared ROS runtime
 
-| Branch | Meaning |
-|--------|---------|
-| `jazzy` (default) | ROS 2 Jazzy / Ubuntu 24.04 (Noble) — primary for Thor |
-| `humble` | ROS 2 Humble / Ubuntu 22.04 (Jammy) packaging track |
-| `ros1` (future) | ROS 1 Noetic track — **not** in this tree yet |
+ROS 1 Noetic and ROS 2 Humble/Jazzy use the same Python modules for frame
+validation, latest-frame buffering, encoder supervision, snapshots, and the
+Edge control socket. The wrappers contain only the ROS-specific subscription,
+parameters, logging, and timers.
 
-## Install (APT, after release train)
+| Input mode | ROS message | Encoder input |
+| --- | --- | --- |
+| `compressed` | `sensor_msgs/CompressedImage` | complete JPEG bytes |
+| `raw` | `sensor_msgs/Image` | packed `rgb8`, `bgr8`, `rgba8`, `bgra8`, or `mono8` bytes |
+
+Raw ROS row padding is removed once and the packed frame enters FFmpeg or
+GStreamer directly. It is never converted to JPEG before H264 encoding.
+Dimensions and raw encoding are explicit, fixed Session configuration; a
+mismatched message is rejected instead of silently changing the stream
+contract. Each received frame is encoded at most once, so a stopped ROS source
+also stops RTP rather than replaying the final frame forever.
+
+The adapter starts inactive. Backend capabilities are preflighted during
+readiness, but the encoder process and any hardware encoder session are not
+allocated until Edge sends `set-active=true`. When the last viewer/recording
+releases the source, `set-active=false` clears pending frames and terminates the
+encoder. The ROS publisher may remain shared with other consumers without
+holding an idle NVENC session for this video path.
+
+## Encoder backends
+
+| Backend | Default | Intended use |
+| --- | --- | --- |
+| `ffmpeg` | yes (`libx264`) | Portable CPU baseline |
+| `gstreamer` | opt-in | Configurable software or hardware pipeline |
+
+There is deliberately no `auto` backend. A deployment selects a reviewed
+capability profile. FFmpeg validates the configured encoder; GStreamer checks
+every selected element factory and every configured property with
+`gst-inspect-1.0` before the control socket becomes ready.
+
+`config/jetson_nvmm_gstreamer.yaml` is the shared NVIDIA capability profile for
+Jetson AGX Orin and Jetson Thor. It requests
+`nvjpegdec -> nvvidconv -> nvv4l2h264enc` for JPEG input, or
+`rawvideoparse -> nvvidconv -> nvv4l2h264enc` for raw input. The runtime does
+not inspect a board model. `config/jetson_thor_gstreamer.yaml` remains as a
+compatibility alias for existing process definitions.
+
+NVIDIA documents these accelerated GStreamer elements for
+[Jetson Linux r36.4.4 (Orin)](https://docs.nvidia.com/jetson/archives/r36.4.4/DeveloperGuide/SD/Multimedia/AcceleratedGstreamer.html)
+and
+[Jetson Linux r38.4 (Thor)](https://docs.nvidia.com/jetson/archives/r38.4/DeveloperGuide/SD/Multimedia/AcceleratedGstreamer.html).
+Thor deployments should use GStreamer for NVIDIA hardware encode; the
+[r38.4 release notes](https://docs.nvidia.com/jetson/archives/r38.4/ReleaseNotes/Jetson_Linux_Release_Notes_r38.4.pdf)
+state that NVIDIA FFmpeg hardware acceleration is not supported there.
+
+## Install
 
 ```bash
-# Jazzy / Noble
-sudo apt update
-sudo apt install ros-jazzy-xgc2-ros-image-rtp-adapter
+# ROS 1 Noetic / Ubuntu 20.04
+sudo apt install ros-noetic-xgc2-ros-image-rtp-adapter
 
-# Humble / Jammy
+# ROS 2 Humble / Ubuntu 22.04
 sudo apt install ros-humble-xgc2-ros-image-rtp-adapter
+
+# ROS 2 Jazzy / Ubuntu 24.04 (Jetson Thor baseline)
+sudo apt install ros-jazzy-xgc2-ros-image-rtp-adapter
 ```
 
-Runtime includes FFmpeg plus standard GStreamer tools/plugins. Vendor plugins
-remain supplied by the target platform image/runtime.
+Packages include the portable FFmpeg/GStreamer dependencies. NVIDIA plugins
+and GPU device access belong to the Agent container/runtime image.
 
 ## Run
 
+ROS 2 JPEG topic:
+
 ```bash
 source /opt/ros/jazzy/setup.bash
-
-# Example: Odin compressed topic (name is only a parameter)
 ros2 launch ros_image_rtp_adapter image_rtp_adapter.launch.py \
-  image_topic:=/odin1/image/compressed \
-  source_id:=odin1 \
+  image_topic:=/camera/front/image/compressed \
+  input_message_type:=compressed \
+  source_id:=front \
   rtp_port:=5004 \
-  control_socket:=/tmp/xgc2-odin-rtp.sock \
+  control_socket:=/tmp/xgc2/media/front.sock \
   width:=1280 height:=720 fps:=15.0
-
-# Pair with media-edge (co-located)
-xgc-media-edge \
-  -control-address 0.0.0.0:18090 \
-  -source-id odin1 \
-  -rtp-listen-address 127.0.0.1:5004 \
-  -source-control-socket /tmp/xgc2-odin-rtp.sock
 ```
 
-Switch cameras without rebuilding:
+ROS 2 raw topic with the Jetson NVMM profile:
 
 ```bash
-image_topic:=/other_cam/image/compressed source_id:=other_cam
-```
-
-Message type must remain `sensor_msgs/msg/CompressedImage` with JPEG payload
-when `require_jpeg:=true` (default).
-
-### Optional GStreamer / hardware profile
-
-The GStreamer backend takes element factory names, caps, and JSON property maps
-as parameters. The adapter passes a list of arguments directly to
-`gst-launch-1.0`; it never invokes a shell or concatenates a vendor pipeline.
-
-Jetson Thor has a separate example profile rather than a code branch:
-
-```bash
-profile="$(ros2 pkg prefix ros_image_rtp_adapter)/share/ros_image_rtp_adapter/config/jetson_thor_gstreamer.yaml"
+profile="$(ros2 pkg prefix ros_image_rtp_adapter)/share/ros_image_rtp_adapter/config/jetson_nvmm_gstreamer.yaml"
 ros2 run ros_image_rtp_adapter image_rtp_adapter --ros-args \
   --params-file "${profile}" \
-  -p image_topic:=/camera/image_raw/compressed \
-  -p source_id:=camera \
+  -p image_topic:=/camera/front/image_raw \
+  -p input_message_type:=raw \
+  -p raw_encoding:=bgr8 \
+  -p source_id:=front \
   -p rtp_port:=5004 \
-  -p control_socket:=/tmp/xgc2-camera-rtp.sock
+  -p control_socket:=/tmp/xgc2/media/front.sock \
+  -p width:=1280 -p height:=720 -p fps:=30.0
 ```
 
-That profile requests `nvjpegdec` → `nvvidconv` → `nvv4l2h264enc`. Before
-spawning the pipeline, the adapter verifies every requested factory with
-`gst-inspect-1.0`. NVIDIA documents the accelerated GStreamer elements for
-Jetson and directs Thor users away from NVIDIA FFmpeg hardware acceleration:
-[accelerated GStreamer](https://docs.nvidia.com/jetson/archives/r38.4/DeveloperGuide/SD/Multimedia/AcceleratedGstreamer.html),
-[Jetson Linux 38.4 release notes](https://docs.nvidia.com/jetson/archives/r38.4/ReleaseNotes/Jetson_Linux_Release_Notes_r38.4.pdf).
+ROS 1 Noetic:
 
-For a different device, select `encoder_backend:=gstreamer` and substitute its
-decoder/converter/encoder factories and property JSON. No rebuild is needed.
+```bash
+source /opt/ros/noetic/setup.bash
+roslaunch ros_image_rtp_adapter image_rtp_adapter.launch \
+  image_topic:=/camera/front/image/compressed \
+  input_message_type:=compressed \
+  source_id:=front \
+  rtp_port:=5004 \
+  control_socket:=/tmp/xgc2/media/front.sock
+```
+
+For ROS 1 on a validated Jetson container, select the ROS 1 form of the same
+capability profile and keep the source parameters independent:
+
+```bash
+profile="$(rospack find ros_image_rtp_adapter)/config/jetson_nvmm_gstreamer.yaml"
+roslaunch ros_image_rtp_adapter image_rtp_adapter.launch \
+  config:="${profile}" \
+  image_topic:=/camera/front/image_raw \
+  input_message_type:=raw raw_encoding:=bgr8 \
+  source_id:=front rtp_port:=5004 \
+  control_socket:=/tmp/xgc2/media/front.sock \
+  width:=1280 height:=720 fps:=30.0
+```
+
+Pair one or more adapters/native sources with one Edge process:
+
+```json
+{
+  "sources": [
+    {
+      "id": "front",
+      "rtpListenAddress": "127.0.0.1:5004",
+      "controlSocket": "/tmp/xgc2/media/front.sock"
+    },
+    {
+      "id": "world",
+      "rtpListenAddress": "127.0.0.1:5006",
+      "controlSocket": "/tmp/xgc2/media/world.sock"
+    }
+  ]
+}
+```
+
+```bash
+xgc-media-edge \
+  --control-address 0.0.0.0:18090 \
+  --sources-config /run/xgc2/media/sources.json
+```
+
+Production ownership is:
+
+```text
+Experiment Run freezes source roster
+  -> Session starts/supervises ingress sources and Media Edge
+  -> browser panel creates/deletes source-scoped viewers
+  -> Session stop tears the products down
+```
+
+Opening a browser must never create a source process, and video never enters
+AgentLink, Core, SSE, or the robot telemetry plane.
 
 ## Parameters
 
 | Parameter | Default | Description |
-|-----------|---------|-------------|
-| `image_topic` | `/camera/image_raw/compressed` | Input topic |
-| `source_id` | `camera` | media-edge source id |
-| `frame_id` | `camera_optical` | Optical frame for describe/snapshot |
-| `rtp_host` | `127.0.0.1` | RTP destination (must stay loopback for Edge) |
-| `rtp_port` | `5004` | RTP port (must match Edge) |
-| `control_socket` | `/tmp/xgc2-image-rtp-adapter.sock` | Absolute Unix socket path |
-| `width` / `height` / `fps` | 1280 / 720 / 15 | Output stream metadata + scale |
-| `bitrate` | 2500000 | Target video bitrate |
-| `encoder_backend` | `ffmpeg` | Explicit `ffmpeg` or `gstreamer` selection |
-| `encoder` | `libx264` | FFmpeg encoder name (compatibility parameter) |
-| `ffmpeg_path` | `ffmpeg` | FFmpeg binary |
-| `ffmpeg_encoder_args_json` | `[]` | Optional FFmpeg argument array; replaces codec defaults |
+| --- | --- | --- |
+| `image_topic` | `/camera/image_raw/compressed` | Fully parameterized input topic |
+| `input_message_type` | `compressed` | Explicit `compressed` or `raw` subscription |
+| `raw_encoding` | `bgr8` | Required packed encoding for raw input |
+| `source_id` | `camera` | Stable Edge source ID |
+| `frame_id` | `camera_optical` | Optical frame in describe/snapshot |
+| `rtp_host` / `rtp_port` | `127.0.0.1` / `5004` | Fixed loopback RTP destination |
+| `control_socket` | `/tmp/xgc2-image-rtp-adapter.sock` | Absolute Unix control socket |
+| `width` / `height` / `fps` | 1280 / 720 / 15 | Fixed output and raw-input contract |
+| `bitrate` | 2500000 | Target H264 bitrate |
+| `encoder_backend` | `ffmpeg` | Explicit `ffmpeg` or `gstreamer` |
+| `encoder` | `libx264` | FFmpeg encoder factory |
+| `ffmpeg_encoder_args_json` | `[]` | Structured FFmpeg argument array |
 | `ffmpeg_video_filter` | generated scale/pad | Optional FFmpeg filter expression |
-| `gstreamer_path` / `gstreamer_inspect_path` | standard command names | GStreamer binaries |
-| `gstreamer_jpeg_parser` | `jpegparse` | JPEG parser factory |
-| `gstreamer_jpeg_caps` | JPEG + stream rate | Input caps template |
-| `gstreamer_jpeg_decoder` | `jpegdec` | JPEG decoder factory |
-| `gstreamer_video_converter` | `videoconvert` | Scale/color converter factory |
-| `gstreamer_video_scaler` | `videoscale` | Scaler factory (`identity` when converter also scales) |
-| `gstreamer_raw_caps` | I420 output caps | Caps template; supports runtime markers |
-| `gstreamer_h264_encoder` | `x264enc` | H264 encoder factory |
-| `gstreamer_*_properties_json` | portable software defaults | Structured element properties |
-| `drop_to_latest` | `true` | Keep only latest frame |
-| `require_jpeg` | `true` | Reject non-JPEG compressed formats |
+| `gstreamer_*` | portable software pipeline | Element, caps, and property profile |
+| `drop_to_latest` | `true` | One-frame queue; `false` selects bounded depth 32 |
+| `require_jpeg` | `true` | Validate complete JPEG compressed frames |
 
-Supported runtime markers in JSON/caps are `@bitrate`, `@bitrate_kbps`,
-`@fps`, `@gop`, `@width`, `@height`, and (caps only) `@fps_fraction`. They keep
-profiles tied to the normal stream parameters without embedding device values
-in Python code.
+Runtime markers are `@bitrate`, `@bitrate_kbps`, `@fps`, `@gop`, `@width`,
+`@height`, and, for caps, `@fps_fraction`.
 
-## CI matrix
+## Gates
 
-GitHub Actions (`.github/workflows/ci.yml`):
+The CI and release matrices cover:
 
-| ROS | Ubuntu | Arch |
-|-----|--------|------|
-| jazzy | noble | amd64, arm64 |
-| humble | jammy | amd64, arm64 |
+| ROS | Ubuntu | Architectures |
+| --- | --- | --- |
+| Noetic | Focal | amd64, arm64 |
+| Humble | Jammy | amd64, arm64 |
+| Jazzy | Noble | amd64, arm64 |
 
-Each cell: **build package → install deb smoke → unit tests → integration with
-xgc2-media-edge** (clone public Edge, run test JPEG publisher + adapter + Edge,
-assert control `describe` + `/healthz` + player page). Failures fail the job;
-issues are not left to operators.
+Every cell builds a real DEB, installs it in its matching ROS/Ubuntu image,
+runs the shared unit suite, proves JPEG and raw GStreamer RTP emission, and
+runs publisher -> adapter -> Media Edge contract integration.
 
-## Development
+Local focused gates:
 
 ```bash
-# In a ROS 2 workspace
-colcon build --packages-select ros_image_rtp_adapter
-source install/setup.bash
-pytest test/test_control_socket.py test/test_encoder.py -q
+PYTHONPATH=. python3 -m pytest \
+  test/test_control_socket.py test/test_encoder.py \
+  test/test_frames.py test/test_runtime.py -q
+./.xgc2/scripts/check_package_compliance.sh
 
-# Full integration (requires go + ffmpeg + media-edge checkout)
-export MEDIA_EDGE_DIR=/path/to/xgc2-media-edge
-./scripts/integration_media_edge.sh
-
-# Long-running browser preview with the portable GStreamer backend
-ENCODER_BACKEND=gstreamer \
-MEDIA_EDGE_DIR=/path/to/xgc2-media-edge \
-./scripts/lab_video_preview.sh
-
-# Same supervised preview command with the optional Thor deployment profile
-ENCODER_BACKEND=gstreamer \
-ENCODER_PARAMS_FILE="$PWD/config/jetson_thor_gstreamer.yaml" \
-MEDIA_EDGE_DIR=/path/to/xgc2-media-edge \
-./scripts/lab_video_preview.sh
+# Full container package/integration gate
+./.xgc2/scripts/build_debs_in_docker.sh \
+  --ros-distro jazzy --ubuntu noble
 ```
 
 ## License

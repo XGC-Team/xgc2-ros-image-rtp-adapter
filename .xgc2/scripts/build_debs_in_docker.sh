@@ -54,62 +54,95 @@ docker run --rm \
     apt-get update
     apt-get install -y --no-install-recommends \
       build-essential cmake dpkg-dev fakeroot file git rsync \
-      python3 python3-pip python3-colcon-common-extensions python3-pytest python3-numpy python3-pil \
+      python3 python3-pip python3-pytest python3-numpy python3-pil \
       ffmpeg curl ca-certificates \
       gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
-      gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
-      "ros-${ROS_DISTRO}-rclpy" "ros-${ROS_DISTRO}-sensor-msgs" "ros-${ROS_DISTRO}-std-msgs" \
-      "ros-${ROS_DISTRO}-launch" "ros-${ROS_DISTRO}-launch-ros" "ros-${ROS_DISTRO}-ros2pkg" \
-      "ros-${ROS_DISTRO}-ament-cmake"
+      gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly
+    if [[ "${ROS_DISTRO}" == "noetic" ]]; then
+      apt-get install -y --no-install-recommends \
+        ros-noetic-catkin ros-noetic-rospy ros-noetic-sensor-msgs \
+        ros-noetic-roslaunch ros-noetic-rosbash ros-noetic-rospack
+    else
+      apt-get install -y --no-install-recommends \
+        python3-colcon-common-extensions \
+        "ros-${ROS_DISTRO}-rclpy" "ros-${ROS_DISTRO}-sensor-msgs" \
+        "ros-${ROS_DISTRO}-std-msgs" "ros-${ROS_DISTRO}-launch" \
+        "ros-${ROS_DISTRO}-launch-ros" "ros-${ROS_DISTRO}-ros2pkg" \
+        "ros-${ROS_DISTRO}-ament-cmake"
+    fi
 
-    # media-edge requires a recent Go toolchain (module go 1.22+).
+    # media-edge declares its exact toolchain floor in go.mod.
     arch="$(dpkg --print-architecture)"
     case "${arch}" in
       amd64) go_arch=amd64 ;;
       arm64) go_arch=arm64 ;;
       *) go_arch="${arch}" ;;
     esac
-    curl -fsSL "https://go.dev/dl/go1.22.10.linux-${go_arch}.tar.gz" -o /tmp/go.tgz
+    curl -fsSL "https://go.dev/dl/go1.26.2.linux-${go_arch}.tar.gz" -o /tmp/go.tgz
     rm -rf /usr/local/go
     tar -C /usr/local -xzf /tmp/go.tgz
     export PATH="/usr/local/go/bin:${PATH:-/usr/bin}"
     go version
 
-    rm -rf /workspace/work/build /workspace/work/install /workspace/work/log /workspace/work/src /workspace/work/install-root
-    mkdir -p /workspace/work/src
-    rsync -a --delete --exclude .work --exclude debs --exclude .git /workspace/repo/ /workspace/work/src/ros_image_rtp_adapter/
+    rm -rf /workspace/work/build /workspace/work/install /workspace/work/log \
+      /workspace/work/src /workspace/work/source /workspace/work/catkin \
+      /workspace/work/install-root
+    mkdir -p /workspace/work/source
+    rsync -a --delete --exclude .work --exclude debs --exclude .git \
+      /workspace/repo/ /workspace/work/source/
 
-    cd /workspace/work
     set +u
     source /opt/ros/${ROS_DISTRO}/setup.bash
     set -u
-    colcon build --packages-select ros_image_rtp_adapter --symlink-install
-    set +u
-    source install/setup.bash
-    set -u
-
-    # unit tests (control socket, no ROS daemon required for pure unit)
-    python3 -m pytest \
-      /workspace/work/src/ros_image_rtp_adapter/test/test_control_socket.py \
-      /workspace/work/src/ros_image_rtp_adapter/test/test_encoder.py -q
-    PYTHONPATH=/workspace/work/src/ros_image_rtp_adapter \
-      python3 /workspace/work/src/ros_image_rtp_adapter/scripts/integration_gstreamer_rtp.py
-
-    # Stage install for deb
-    mkdir -p /workspace/work/install-root
-    # colcon install layout already under install/
-    # Reinstall into DESTDIR-like tree via pip/ament path copy
-    colcon build --packages-select ros_image_rtp_adapter \
-      --cmake-args -DCMAKE_INSTALL_PREFIX=/opt/ros/${ROS_DISTRO} 2>/dev/null || true
-    # ament_python: copy install tree
-    mkdir -p /workspace/work/install-root/opt/ros/${ROS_DISTRO}
-    rsync -a install/ /workspace/work/install-root/opt/ros/${ROS_DISTRO}/merge 2>/dev/null || true
-    # Prefer isolated package install layout
-    if [[ -d install/ros_image_rtp_adapter ]]; then
-      rsync -a install/ros_image_rtp_adapter/ /workspace/work/install-root/opt/ros/${ROS_DISTRO}/
+    if [[ "${ROS_DISTRO}" == "noetic" ]]; then
+      mkdir -p /workspace/work/catkin/src
+      ln -s /workspace/work/source/ros1 \
+        /workspace/work/catkin/src/ros_image_rtp_adapter
+      cd /workspace/work/catkin
+      catkin_make \
+        -DROS_IMAGE_RTP_COMMON_DIR=/workspace/work/source/ros_image_rtp_adapter
+      set +u
+      source devel/setup.bash
+      set -u
+      export WORKSPACE_INSTALL=/workspace/work/catkin/devel
     else
-      # merged install
-      rsync -a install/ /workspace/work/install-root/opt/ros/${ROS_DISTRO}/
+      mkdir -p /workspace/work/src
+      ln -s /workspace/work/source /workspace/work/src/ros_image_rtp_adapter
+      cd /workspace/work
+      # Release/package staging must contain real files, never source-tree
+      # egg-links from a developer symlink install.
+      colcon build --packages-select ros_image_rtp_adapter
+      set +u
+      source install/setup.bash
+      set -u
+      export WORKSPACE_INSTALL=/workspace/work/install
+    fi
+
+    # ROS-neutral unit and real GStreamer RTP tests.
+    PYTHONPATH=/workspace/work/source python3 -m pytest \
+      /workspace/work/source/test/test_control_socket.py \
+      /workspace/work/source/test/test_encoder.py \
+      /workspace/work/source/test/test_frames.py \
+      /workspace/work/source/test/test_runtime.py -q
+    PYTHONPATH=/workspace/work/source \
+      python3 /workspace/work/source/scripts/integration_gstreamer_rtp.py
+
+    mkdir -p /workspace/work/install-root
+    if [[ "${ROS_DISTRO}" == "noetic" ]]; then
+      cd /workspace/work/catkin
+      DESTDIR=/workspace/work/install-root catkin_make install \
+        -DCMAKE_INSTALL_PREFIX=/opt/ros/noetic \
+        -DROS_IMAGE_RTP_COMMON_DIR=/workspace/work/source/ros_image_rtp_adapter
+    else
+      cd /workspace/work
+      # ament_python install layout is copied beneath its ROS prefix.
+      mkdir -p /workspace/work/install-root/opt/ros/${ROS_DISTRO}
+      if [[ -d install/ros_image_rtp_adapter ]]; then
+        rsync -a install/ros_image_rtp_adapter/ \
+          /workspace/work/install-root/opt/ros/${ROS_DISTRO}/
+      else
+        rsync -a install/ /workspace/work/install-root/opt/ros/${ROS_DISTRO}/
+      fi
     fi
 
     /workspace/repo/.xgc2/scripts/package_debs.sh \
@@ -120,7 +153,11 @@ docker run --rm \
     if [[ "${INSTALL_CHECK}" == "true" ]]; then
       apt-get install -y /workspace/out/ros-${ROS_DISTRO}-xgc2-ros-image-rtp-adapter_*.deb
       dpkg -L ros-${ROS_DISTRO}-xgc2-ros-image-rtp-adapter | head
-      bash -lc "source /opt/ros/${ROS_DISTRO}/setup.bash && ros2 pkg prefix ros_image_rtp_adapter"
+      if [[ "${ROS_DISTRO}" == "noetic" ]]; then
+        bash -lc "source /opt/ros/noetic/setup.bash && rospack find ros_image_rtp_adapter"
+      else
+        bash -lc "source /opt/ros/${ROS_DISTRO}/setup.bash && ros2 pkg prefix ros_image_rtp_adapter"
+      fi
     fi
 
     if [[ "${RUN_INTEGRATION}" == "true" ]]; then
@@ -128,7 +165,6 @@ docker run --rm \
       rm -rf /workspace/work/media-edge
       git clone --depth 1 --branch "${MEDIA_EDGE_REF}" "${MEDIA_EDGE_URL}" /workspace/work/media-edge
       export MEDIA_EDGE_DIR=/workspace/work/media-edge
-      export WORKSPACE_INSTALL=/workspace/work/install
       # repo is mounted read-only; copy scripts into the writable workdir
       cp -a /workspace/repo/scripts /workspace/work/integration-scripts
       chmod +x /workspace/work/integration-scripts/*.sh /workspace/work/integration-scripts/*.py || true

@@ -23,7 +23,15 @@ def make_jpeg(frame: int, width: int, height: int) -> bytes:
     return output.getvalue()
 
 
-def main() -> None:
+def make_rgb(frame: int, width: int, height: int) -> bytes:
+    image = Image.new("RGB", (width, height), ((frame * 17) % 255, 30, 80))
+    draw = ImageDraw.Draw(image)
+    offset = (frame * 11) % max(1, width - 40)
+    draw.rectangle((offset, 20, offset + 39, height - 20), fill=(0, 220, 255))
+    return image.tobytes()
+
+
+def collect_packets(input_format: str):
     receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     receiver.bind(("127.0.0.1", 0))
     receiver.setblocking(False)
@@ -37,6 +45,7 @@ def main() -> None:
         height=180,
         fps=10.0,
         bitrate=800_000,
+        input_format=input_format,
     )
 
     packets = []
@@ -45,7 +54,12 @@ def main() -> None:
         deadline = time.monotonic() + 8.0
         frame = 0
         while time.monotonic() < deadline and len(packets) < 20:
-            encoder.write_jpeg(make_jpeg(frame, 320, 180))
+            data = (
+                make_jpeg(frame, 320, 180)
+                if input_format == "jpeg"
+                else make_rgb(frame, 320, 180)
+            )
+            encoder.write_frame(data)
             frame += 1
             frame_deadline = time.monotonic() + 0.1
             while time.monotonic() < frame_deadline:
@@ -64,6 +78,10 @@ def main() -> None:
         encoder.stop()
         receiver.close()
 
+    return packets, rtp_port
+
+
+def validate_packets(packets, input_format: str, rtp_port: int) -> None:
     for packet in packets:
         if len(packet) < 13:
             raise RuntimeError("short UDP payload is not RTP/H264")
@@ -79,9 +97,15 @@ def main() -> None:
     if marker_packets < 1:
         raise RuntimeError("no RTP marker packet observed")
     print(
-        "gstreamer RTP integration OK: "
+        f"gstreamer {input_format} RTP integration OK: "
         f"packets={len(packets)} marker_packets={marker_packets} port={rtp_port}"
     )
+
+
+def main() -> None:
+    for input_format in ("jpeg", "rgb8"):
+        packets, rtp_port = collect_packets(input_format)
+        validate_packets(packets, input_format, rtp_port)
 
 
 if __name__ == "__main__":

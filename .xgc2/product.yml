@@ -1,14 +1,15 @@
 schema: xgc2.product.v1
 id: xgc2-ros-image-rtp-adapter
 name: XGC2 ROS Image RTP Adapter
-version: 0.2.0
+version: 0.3.0
 kind: ros2-apt
 summary: >-
-  Parameterized ROS 2 CompressedImage (JPEG) to H264/RTP adapter implementing
-  the xgc2-media-edge source control contract. Topics, source IDs, FFmpeg
-  codecs, and GStreamer software/hardware elements are deployment parameters.
-  Ships ROS Jazzy (noble) and ROS Humble (jammy) packages.
+  Parameterized ROS 1/ROS 2 Image or CompressedImage to H264/RTP adapter
+  implementing the xgc2-media-edge source control contract. Topics, message
+  types, image formats, and FFmpeg/GStreamer capabilities are deployment data.
+  Ships Noetic/Focal, Humble/Jammy, and Jazzy/Noble packages.
 groups:
+- ros1
 - ros2
 - driver
 - media
@@ -17,14 +18,19 @@ ros:
   packages:
   - ros_image_rtp_adapter
 apt:
-  distribution: jammy,noble
+  distribution: focal,jammy,noble
   install:
+  - ros-noetic-xgc2-ros-image-rtp-adapter
   - ros-jazzy-xgc2-ros-image-rtp-adapter
   - ros-humble-xgc2-ros-image-rtp-adapter
   packages:
+  - ros-noetic-xgc2-ros-image-rtp-adapter
   - ros-jazzy-xgc2-ros-image-rtp-adapter
   - ros-humble-xgc2-ros-image-rtp-adapter
   package_architectures:
+    ros-noetic-xgc2-ros-image-rtp-adapter:
+    - amd64
+    - arm64
     ros-jazzy-xgc2-ros-image-rtp-adapter:
     - amd64
     - arm64
@@ -32,6 +38,8 @@ apt:
     - amd64
     - arm64
   package_distributions:
+    ros-noetic-xgc2-ros-image-rtp-adapter:
+    - focal
     ros-jazzy-xgc2-ros-image-rtp-adapter:
     - noble
     ros-humble-xgc2-ros-image-rtp-adapter:
@@ -51,9 +59,11 @@ apt:
   - xgc2-media-edge
 usage:
   install: |
-    # Thor / Ubuntu 24.04 + Jazzy
+    # Jetson Thor / Ubuntu 24.04 + Jazzy
     sudo apt update
     sudo apt install ros-jazzy-xgc2-ros-image-rtp-adapter
+    # ROS 1 Noetic / Ubuntu 20.04
+    # sudo apt install ros-noetic-xgc2-ros-image-rtp-adapter
     # Ubuntu 22.04 + Humble
     # sudo apt install ros-humble-xgc2-ros-image-rtp-adapter
   smoke_test: |
@@ -61,6 +71,9 @@ usage:
     test -x "$(ros2 pkg prefix ros_image_rtp_adapter)/lib/ros_image_rtp_adapter/image_rtp_adapter"
 ownership:
   paths:
+  - /opt/ros/noetic/lib/ros_image_rtp_adapter
+  - /opt/ros/noetic/share/ros_image_rtp_adapter
+  - /opt/ros/noetic/lib/python3/dist-packages/ros_image_rtp_adapter
   - /opt/ros/jazzy/lib/ros_image_rtp_adapter
   - /opt/ros/jazzy/share/ros_image_rtp_adapter
   - /opt/ros/jazzy/lib/python3.12/site-packages/ros_image_rtp_adapter
@@ -79,5 +92,6 @@ release:
   dependency_policy:
     xgc2-media-edge: order
   apt_versions:
-    jammy: 0.2.0
-    noble: 0.2.0
+    focal: 0.3.0
+    jammy: 0.3.0
+    noble: 0.3.0

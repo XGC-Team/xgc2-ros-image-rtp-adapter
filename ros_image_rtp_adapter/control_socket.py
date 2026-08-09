@@ -63,7 +63,9 @@ class SourceControlServer:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._server: Optional[socket.socket] = None
-        self._active = True
+        # Capture sources are demand-driven.  Edge explicitly activates them
+        # for a viewer, recording, or snapshot transaction.
+        self._active = False
 
     @property
     def active(self) -> bool:
@@ -85,7 +87,11 @@ class SourceControlServer:
         server.listen(16)
         server.settimeout(0.5)
         self._server = server
-        self._thread = threading.Thread(target=self._serve_loop, name="source-control", daemon=True)
+        self._thread = threading.Thread(
+            target=self._serve_loop,
+            name="source-control",
+            daemon=True,
+        )
         self._thread.start()
 
     def stop(self) -> None:
@@ -145,10 +151,25 @@ class SourceControlServer:
             self._write_json(conn, self._description.as_dict())
             return
         if operation == "set-active":
-            active = bool(request.get("active", True))
+            if "active" not in request or not isinstance(request["active"], bool):
+                self._write_json(
+                    conn,
+                    {"ok": False, "error": "active must be a boolean"},
+                )
+                return
+            active = request["active"]
+            previous = self._active
+            try:
+                if self._on_set_active is not None:
+                    self._on_set_active(active)
+            except Exception as exc:  # The source must stay controllable.
+                self._active = previous
+                self._write_json(
+                    conn,
+                    {"ok": False, "error": f"set-active failed: {exc}"},
+                )
+                return
             self._active = active
-            if self._on_set_active is not None:
-                self._on_set_active(active)
             self._write_json(conn, {"ok": True, "active": active})
             return
         if operation == "request-keyframe":

@@ -1,4 +1,4 @@
-"""Pluggable JPEG-bytes to H264/RTP subprocess encoders.
+"""Pluggable image-frame to H264/RTP subprocess encoders.
 
 The ROS-facing package is intentionally hardware-neutral.  FFmpeg is the
 portable software default; GStreamer element factories and properties are
@@ -15,7 +15,7 @@ import re
 import signal
 import subprocess
 import threading
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 
 PropertyValue = Union[str, int, float, bool]
@@ -24,6 +24,13 @@ ArgumentInput = Union[str, Sequence[str]]
 
 _ELEMENT_NAME = re.compile(r"^[A-Za-z0-9_.+-]+$")
 _PROPERTY_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+_RAW_INPUTS: Mapping[str, Tuple[str, str, int]] = {
+    "rgb8": ("rgb24", "rgb", 3),
+    "bgr8": ("bgr24", "bgr", 3),
+    "rgba8": ("rgba", "rgba", 4),
+    "bgra8": ("bgra", "bgra", 4),
+    "mono8": ("gray", "gray8", 1),
+}
 
 
 def _parse_properties(value: PropertyInput, parameter_name: str) -> Dict[str, PropertyValue]:
@@ -78,8 +85,31 @@ def _format_number(value: float) -> str:
     return str(int(value)) if float(value).is_integer() else str(value)
 
 
+def normalize_input_format(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized == "jpeg":
+        return normalized
+    if normalized not in _RAW_INPUTS:
+        raise ValueError(
+            "input_format must be one of: jpeg, " + ", ".join(_RAW_INPUTS)
+        )
+    return normalized
+
+
+def packed_frame_bytes(input_format: str, width: int, height: int) -> int:
+    normalized = normalize_input_format(input_format)
+    if normalized == "jpeg":
+        raise ValueError("JPEG frames are variable length")
+    return int(width) * int(height) * _RAW_INPUTS[normalized][2]
+
+
 class SubprocessJpegRtpEncoder:
-    """Common supervised stdin/subprocess lifecycle for encoder backends."""
+    """Common supervised stdin/subprocess lifecycle for encoder backends.
+
+    The historical class name remains public for compatibility. Instances now
+    accept either complete JPEGs or fixed-size packed raw frames selected by
+    the explicit ``input_format`` constructor argument.
+    """
 
     def __init__(self) -> None:
         self._proc: Optional[subprocess.Popen] = None
@@ -102,22 +132,36 @@ class SubprocessJpegRtpEncoder:
                 return
             self._launch_locked()
 
+    def preflight(self) -> None:
+        """Validate the configured backend without allocating an encoder."""
+
+        with self._lock:
+            if self._runtime_validated:
+                return
+            self.validate_runtime()
+            self._runtime_validated = True
+
     def stop(self) -> None:
         with self._lock:
             proc = self._proc
             self._proc = None
         self._stop_process(proc)
 
-    def write_jpeg(self, jpeg: bytes) -> None:
+    def write_frame(self, frame: bytes) -> None:
         with self._lock:
             proc = self._proc
             if proc is None or proc.stdin is None:
                 return
             try:
-                proc.stdin.write(jpeg)
+                proc.stdin.write(frame)
                 proc.stdin.flush()
             except (BrokenPipeError, OSError):
                 self._restart_locked()
+
+    def write_jpeg(self, jpeg: bytes) -> None:
+        """Compatibility wrapper for pre-0.3 callers."""
+
+        self.write_frame(jpeg)
 
     def request_keyframe(self) -> None:
         # Stdin-driven command-line encoders expose no portable live force-IDR
@@ -205,6 +249,7 @@ class FFmpegJpegRtpEncoder(SubprocessJpegRtpEncoder):
         height: int,
         fps: float,
         bitrate: int,
+        input_format: str = "jpeg",
         encoder: str = "libx264",
         encoder_args: ArgumentInput = "[]",
         video_filter: str = "",
@@ -217,6 +262,7 @@ class FFmpegJpegRtpEncoder(SubprocessJpegRtpEncoder):
         self._height = int(height)
         self._fps = float(fps)
         self._bitrate = int(bitrate)
+        self._input_format = normalize_input_format(input_format)
         self._encoder = encoder
         self._encoder_args = _parse_arguments(encoder_args, "ffmpeg_encoder_args_json")
         self._video_filter = video_filter
@@ -246,7 +292,6 @@ class FFmpegJpegRtpEncoder(SubprocessJpegRtpEncoder):
             )
 
     def _build_command(self) -> List[str]:
-        # image2pipe + mjpeg demux accepts concatenated complete JPEG frames.
         gop = max(1, int(round(self._fps)))
         video_filter = self._video_filter or (
             f"scale={self._width}:{self._height}:force_original_aspect_ratio=decrease,"
@@ -261,20 +306,38 @@ class FFmpegJpegRtpEncoder(SubprocessJpegRtpEncoder):
             "nobuffer",
             "-flags",
             "low_delay",
-            "-f",
-            "image2pipe",
-            "-vcodec",
-            "mjpeg",
-            "-framerate",
-            str(self._fps),
-            "-i",
-            "pipe:0",
-            "-an",
-            "-vf",
-            video_filter,
-            "-c:v",
-            self._encoder,
         ]
+        if self._input_format == "jpeg":
+            # image2pipe + mjpeg accepts concatenated complete JPEG frames.
+            command.extend(
+                [
+                    "-f",
+                    "image2pipe",
+                    "-vcodec",
+                    "mjpeg",
+                    "-framerate",
+                    str(self._fps),
+                    "-i",
+                    "pipe:0",
+                ]
+            )
+        else:
+            pixel_format = _RAW_INPUTS[self._input_format][0]
+            command.extend(
+                [
+                    "-f",
+                    "rawvideo",
+                    "-pixel_format",
+                    pixel_format,
+                    "-video_size",
+                    f"{self._width}x{self._height}",
+                    "-framerate",
+                    str(self._fps),
+                    "-i",
+                    "pipe:0",
+                ]
+            )
+        command.extend(["-an", "-vf", video_filter, "-c:v", self._encoder])
 
         if self._encoder_args:
             command.extend(self._expand_arguments(self._encoder_args, gop))
@@ -345,6 +408,7 @@ class GStreamerJpegRtpEncoder(SubprocessJpegRtpEncoder):
         height: int,
         fps: float,
         bitrate: int,
+        input_format: str = "jpeg",
         jpeg_parser: str = "jpegparse",
         jpeg_caps: str = "image/jpeg,framerate=@fps_fraction",
         jpeg_decoder: str = "jpegdec",
@@ -371,6 +435,7 @@ class GStreamerJpegRtpEncoder(SubprocessJpegRtpEncoder):
         self._height = int(height)
         self._fps = float(fps)
         self._bitrate = int(bitrate)
+        self._input_format = normalize_input_format(input_format)
         self._jpeg_parser = _validate_element_name(jpeg_parser, "gstreamer_jpeg_parser")
         self._jpeg_caps = self._validate_caps(
             jpeg_caps, "image/jpeg", "gstreamer_jpeg_caps"
@@ -416,34 +481,62 @@ class GStreamerJpegRtpEncoder(SubprocessJpegRtpEncoder):
                 + (f": {detail}" if detail else "")
             )
 
-        elements = [
-            "fdsrc",
-            self._jpeg_parser,
-            self._jpeg_decoder,
-            self._video_converter,
-            self._video_scaler,
-            self._h264_encoder,
-            "h264parse",
-            "rtph264pay",
-            "udpsink",
-        ]
+        elements = ["fdsrc"]
+        if self._input_format == "jpeg":
+            elements.extend([self._jpeg_parser, self._jpeg_decoder])
+        else:
+            elements.append("rawvideoparse")
+        elements.extend(
+            [
+                self._video_converter,
+                self._video_scaler,
+                self._h264_encoder,
+                "h264parse",
+                "rtph264pay",
+                "udpsink",
+            ]
+        )
+        inspected: Dict[str, str] = {}
         for element in dict.fromkeys(elements):
             try:
                 result = subprocess.run(
                     [self._gstreamer_inspect_path, element],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
                     check=False,
                     timeout=10,
                 )
             except (OSError, subprocess.TimeoutExpired) as exc:
                 raise RuntimeError(f"GStreamer preflight failed for {element}: {exc}") from exc
             if result.returncode != 0:
-                detail = result.stderr.decode("utf-8", errors="replace").strip()
+                detail = result.stdout.decode("utf-8", errors="replace").strip()
                 raise RuntimeError(
                     f"GStreamer element {element!r} is unavailable"
                     + (f": {detail}" if detail else "")
                 )
+            inspected[element] = result.stdout.decode("utf-8", errors="replace")
+
+        property_sets = (
+            (self._jpeg_decoder, self._decoder_properties)
+            if self._input_format == "jpeg"
+            else (None, {})
+        ), (self._video_converter, self._converter_properties), (
+            self._h264_encoder,
+            self._encoder_properties,
+        )
+        for element, properties in property_sets:
+            if element is None:
+                continue
+            output = inspected[element]
+            for property_name in properties:
+                pattern = re.compile(
+                    rf"(?m)^\s+{re.escape(property_name)}\s*:"
+                )
+                if not pattern.search(output):
+                    raise RuntimeError(
+                        f"GStreamer element {element!r} has no configured "
+                        f"property {property_name!r}"
+                    )
 
     def _build_command(self) -> List[str]:
         command = [
@@ -452,14 +545,37 @@ class GStreamerJpegRtpEncoder(SubprocessJpegRtpEncoder):
             "fdsrc",
             "fd=0",
             "do-timestamp=true",
-            "!",
-            self._expanded_caps(self._jpeg_caps),
-            "!",
-            self._jpeg_parser,
-            "!",
-            self._jpeg_decoder,
         ]
-        command.extend(self._property_arguments(self._decoder_properties))
+        if self._input_format == "jpeg":
+            command.extend(
+                [
+                    "!",
+                    self._expanded_caps(self._jpeg_caps),
+                    "!",
+                    self._jpeg_parser,
+                    "!",
+                    self._jpeg_decoder,
+                ]
+            )
+            command.extend(self._property_arguments(self._decoder_properties))
+        else:
+            raw_format = _RAW_INPUTS[self._input_format][1]
+            command.extend(
+                [
+                    "blocksize=%d"
+                    % packed_frame_bytes(
+                        self._input_format,
+                        self._width,
+                        self._height,
+                    ),
+                    "!",
+                    "rawvideoparse",
+                    f"format={raw_format}",
+                    f"width={self._width}",
+                    f"height={self._height}",
+                    f"framerate={self._expanded_fps_fraction()}",
+                ]
+            )
         command.extend(["!", self._video_converter])
         command.extend(self._property_arguments(self._converter_properties))
         command.extend(
@@ -504,17 +620,20 @@ class GStreamerJpegRtpEncoder(SubprocessJpegRtpEncoder):
         return value
 
     def _expanded_caps(self, template: str) -> str:
-        fps_fraction = Fraction(str(self._fps)).limit_denominator(1001)
         replacements = {
             "@width": str(self._width),
             "@height": str(self._height),
-            "@fps_fraction": f"{fps_fraction.numerator}/{fps_fraction.denominator}",
+            "@fps_fraction": self._expanded_fps_fraction(),
             "@fps": _format_number(self._fps),
         }
         caps = template
         for marker, replacement in replacements.items():
             caps = caps.replace(marker, replacement)
         return caps
+
+    def _expanded_fps_fraction(self) -> str:
+        fps_fraction = Fraction(str(self._fps)).limit_denominator(1001)
+        return f"{fps_fraction.numerator}/{fps_fraction.denominator}"
 
     def _property_arguments(self, properties: Mapping[str, PropertyValue]) -> List[str]:
         gop = max(1, int(round(self._fps)))

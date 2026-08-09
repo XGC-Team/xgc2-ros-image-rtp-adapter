@@ -1,0 +1,47 @@
+#!/usr/bin/env python3
+"""Publish a moving ROS 1 JPEG stream for package/integration gates."""
+
+import argparse
+from io import BytesIO
+
+from PIL import Image, ImageDraw
+import rospy
+from sensor_msgs.msg import CompressedImage
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--topic", default="/camera/image_raw/compressed")
+    parser.add_argument("--width", type=int, default=640)
+    parser.add_argument("--height", type=int, default=360)
+    parser.add_argument("--fps", type=float, default=10.0)
+    arguments, _ = parser.parse_known_args(rospy.myargv()[1:])
+
+    rospy.init_node("publish_test_jpeg", anonymous=True)
+    publisher = rospy.Publisher(arguments.topic, CompressedImage, queue_size=2)
+    rate = rospy.Rate(arguments.fps)
+    frame_index = 0
+    while not rospy.is_shutdown():
+        frame_index += 1
+        image = Image.new(
+            "RGB",
+            (arguments.width, arguments.height),
+            ((frame_index * 11) % 255, 48, 160),
+        )
+        draw = ImageDraw.Draw(image)
+        x = (frame_index * 17) % max(1, arguments.width - 80)
+        draw.rectangle((x, 20, x + 80, 100), fill=(255, 220, 0))
+        output = BytesIO()
+        image.save(output, format="JPEG", quality=80)
+
+        message = CompressedImage()
+        message.header.stamp = rospy.Time.now()
+        message.header.frame_id = "camera_optical"
+        message.format = "jpeg"
+        message.data = output.getvalue()
+        publisher.publish(message)
+        rate.sleep()
+
+
+if __name__ == "__main__":
+    main()

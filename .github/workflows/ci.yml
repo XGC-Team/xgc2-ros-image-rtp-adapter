@@ -37,6 +37,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - ros_distro: noetic
+            ubuntu: focal
+            distribution: focal
+            arch: amd64
+            runner: ubuntu-24.04
+          - ros_distro: noetic
+            ubuntu: focal
+            distribution: focal
+            arch: arm64
+            runner: ubuntu-24.04-arm
           - ros_distro: jazzy
             ubuntu: noble
             distribution: noble

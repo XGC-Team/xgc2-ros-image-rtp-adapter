@@ -1,0 +1,32 @@
+<launch>
+  <arg name="config" default="$(find ros_image_rtp_adapter)/config/default.yaml" />
+  <arg name="image_topic" default="/camera/image_raw/compressed" />
+  <arg name="input_message_type" default="compressed" />
+  <arg name="raw_encoding" default="bgr8" />
+  <arg name="source_id" default="camera" />
+  <arg name="frame_id" default="camera_optical" />
+  <arg name="rtp_port" default="5004" />
+  <arg name="control_socket" default="/tmp/xgc2-image-rtp-adapter.sock" />
+  <arg name="width" default="1280" />
+  <arg name="height" default="720" />
+  <arg name="fps" default="15.0" />
+  <arg name="bitrate" default="2500000" />
+  <arg name="encoder_backend" default="ffmpeg" />
+
+  <node pkg="ros_image_rtp_adapter" type="image_rtp_adapter"
+        name="image_rtp_adapter" output="screen">
+    <rosparam command="load" file="$(arg config)" />
+    <param name="image_topic" value="$(arg image_topic)" />
+    <param name="input_message_type" value="$(arg input_message_type)" />
+    <param name="raw_encoding" value="$(arg raw_encoding)" />
+    <param name="source_id" value="$(arg source_id)" />
+    <param name="frame_id" value="$(arg frame_id)" />
+    <param name="rtp_port" value="$(arg rtp_port)" />
+    <param name="control_socket" value="$(arg control_socket)" />
+    <param name="width" value="$(arg width)" />
+    <param name="height" value="$(arg height)" />
+    <param name="fps" value="$(arg fps)" />
+    <param name="bitrate" value="$(arg bitrate)" />
+    <param name="encoder_backend" value="$(arg encoder_backend)" />
+  </node>
+</launch>

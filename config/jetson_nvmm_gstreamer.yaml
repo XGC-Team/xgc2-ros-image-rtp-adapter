@@ -1,11 +1,9 @@
-# Compatibility alias retained for existing Thor process definitions.
-# New deployments should use jetson_nvmm_gstreamer.yaml, whose capability
-# contract is shared by Jetson AGX Orin and Jetson Thor.
+# Optional capability profile for NVIDIA Jetson NVMM pipelines.
 #
-# This file is deliberately separate from the portable defaults. The adapter
-# code performs no NVIDIA or board-model detection: a Session/deployment may
-# opt into this profile only after gst-inspect confirms all three NVIDIA
-# element factories are present in its container.
+# The same profile is usable on Jetson AGX Orin and Jetson Thor when their
+# container exposes these exact GStreamer factories and properties. The
+# runtime never detects a board model. It fails before opening its control
+# socket if gst-inspect cannot prove the configured capability surface.
 image_rtp_adapter:
   ros__parameters:
     encoder_backend: gstreamer
@@ -13,7 +11,7 @@ image_rtp_adapter:
     gstreamer_jpeg_caps: image/jpeg,framerate=@fps_fraction
     gstreamer_jpeg_decoder: nvjpegdec
     gstreamer_video_converter: nvvidconv
-    # nvvidconv already scales in NVMM; identity preserves that memory path.
+    # nvvidconv scales/uploads either decoded JPEG or packed ROS Image input.
     gstreamer_video_scaler: identity
     gstreamer_raw_caps: >-
       video/x-raw(memory:NVMM),format=NV12,width=@width,height=@height,framerate=@fps_fraction

@@ -66,6 +66,24 @@ def test_non_x264_encoder_does_not_receive_x264_only_options():
     assert "-x264-params" not in command
 
 
+def test_ffmpeg_raw_input_is_explicit_fixed_size_and_never_roundtrips_through_jpeg():
+    command = FFmpegJpegRtpEncoder(
+        ffmpeg_path="ffmpeg",
+        rtp_host="127.0.0.1",
+        rtp_port=5004,
+        width=640,
+        height=360,
+        fps=10.0,
+        bitrate=1_000_000,
+        input_format="bgr8",
+    )._build_command()
+
+    assert command[command.index("-f") + 1] == "rawvideo"
+    assert command[command.index("-pixel_format") + 1] == "bgr24"
+    assert command[command.index("-video_size") + 1] == "640x360"
+    assert "mjpeg" not in command
+
+
 def test_ffmpeg_custom_arguments_expand_backend_neutral_runtime_markers():
     encoder = FFmpegJpegRtpEncoder(
         ffmpeg_path="ffmpeg",
@@ -132,6 +150,18 @@ def test_gstreamer_vendor_elements_are_profile_data_not_code_branches():
     assert "insert-sps-pps=true" in command
 
 
+def test_gstreamer_raw_input_uses_rawvideoparse_before_the_configured_converter():
+    command = make_gstreamer_encoder(input_format="rgba8")._build_command()
+
+    assert "rawvideoparse" in command
+    assert "format=rgba" in command
+    assert "width=1280" in command
+    assert "height=720" in command
+    assert command.index("rawvideoparse") < command.index("videoconvert")
+    assert "jpegparse" not in command
+    assert "jpegdec" not in command
+
+
 def test_gstreamer_rejects_pipeline_injection_in_element_or_caps():
     with pytest.raises(ValueError, match="element factory"):
         make_gstreamer_encoder(h264_encoder="x264enc ! fakesink")
@@ -171,4 +201,17 @@ def test_gstreamer_preflight_reports_the_missing_element():
         side_effect=[launcher, unavailable],
     ):
         with pytest.raises(RuntimeError, match="fdsrc"):
+            encoder.validate_runtime()
+
+
+def test_gstreamer_preflight_rejects_unknown_configured_properties():
+    encoder = make_gstreamer_encoder(encoder_properties='{"not-a-property":1}')
+    launcher = Mock(returncode=0, stderr=b"")
+    inspection = Mock(returncode=0, stdout=b"Element Properties:\n  name : name\n")
+
+    with patch(
+        "ros_image_rtp_adapter.encoder.subprocess.run",
+        side_effect=[launcher] + [inspection] * 16,
+    ):
+        with pytest.raises(RuntimeError, match="not-a-property"):
             encoder.validate_runtime()

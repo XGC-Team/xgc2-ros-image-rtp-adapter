@@ -133,9 +133,12 @@ jobs:
         run: |
           set -euo pipefail
           python3 -m pip install --user pytest
-          PYTHONPATH=. python3 -m pytest test/test_control_socket.py test/test_encoder.py -q
+          python3 -m pip install --user pillow
+          PYTHONPATH=. python3 -m pytest \
+            test/test_control_socket.py test/test_encoder.py \
+            test/test_frames.py test/test_runtime.py -q
 
-  # Matrix: Ubuntu 22.04/24.04 × amd64/arm64  →  humble/jazzy debs
+  # Matrix: Ubuntu 20.04/22.04/24.04 x amd64/arm64 -> noetic/humble/jazzy debs
   build-debs:
     needs:
       - validate-release-inputs
@@ -144,6 +147,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - ros_distro: noetic
+            ubuntu: focal
+            distribution: focal
+            arch: amd64
+            runner: ubuntu-24.04
+          - ros_distro: noetic
+            ubuntu: focal
+            distribution: focal
+            arch: arm64
+            runner: ubuntu-24.04-arm
           - ros_distro: jazzy
             ubuntu: noble
             distribution: noble

@@ -25,6 +25,7 @@ cleanup() {
   [[ -n "${PUB_PID:-}" ]] && kill "${PUB_PID}" 2>/dev/null
   [[ -n "${ADAPTER_PID:-}" ]] && kill "${ADAPTER_PID}" 2>/dev/null
   [[ -n "${EDGE_PID:-}" ]] && kill "${EDGE_PID}" 2>/dev/null
+  [[ -n "${MASTER_PID:-}" ]] && kill "${MASTER_PID}" 2>/dev/null
   wait 2>/dev/null || true
   rm -rf "${WORK}"
   rm -f "${CONTROL_SOCKET}"
@@ -79,31 +80,72 @@ else
   )
 fi
 
-log "starting test JPEG publisher on ${IMAGE_TOPIC}"
-# Args before --ros-args so publish_test_jpeg argparse receives them.
-ros2 run ros_image_rtp_adapter publish_test_jpeg \
-  --topic "${IMAGE_TOPIC}" --width "${WIDTH}" --height "${HEIGHT}" --fps "${FPS}" \
-  >"${WORK}/publisher.log" 2>&1 &
-PUB_PID=$!
+if [[ "${ROS_DISTRO}" == "noetic" ]]; then
+  log "starting ROS 1 master"
+  roscore >"${WORK}/roscore.log" 2>&1 &
+  MASTER_PID=$!
+  deadline=$((SECONDS + TIMEOUT_SEC))
+  until rosparam list >/dev/null 2>&1; do
+    if (( SECONDS >= deadline )); then
+      cat "${WORK}/roscore.log" >&2 || true
+      exit 1
+    fi
+    sleep 0.25
+  done
 
-log "starting image_rtp_adapter"
-ros2 run ros_image_rtp_adapter image_rtp_adapter --ros-args \
-  -p image_topic:="${IMAGE_TOPIC}" \
-  -p source_id:="${SOURCE_ID}" \
-  -p frame_id:=camera_optical \
-  -p rtp_host:=127.0.0.1 \
-  -p rtp_port:="${RTP_PORT}" \
-  -p control_socket:="${CONTROL_SOCKET}" \
-  -p width:="${WIDTH}" \
-  -p height:="${HEIGHT}" \
-  -p fps:="${FPS}.0" \
-  -p bitrate:=1500000 \
-  -p encoder:=libx264 \
-  -p ffmpeg_path:=ffmpeg \
-  -p drop_to_latest:=true \
-  -p require_jpeg:=true \
-  >"${WORK}/adapter.log" 2>&1 &
-ADAPTER_PID=$!
+  log "starting ROS 1 test JPEG publisher on ${IMAGE_TOPIC}"
+  rosrun ros_image_rtp_adapter publish_test_jpeg \
+    --topic "${IMAGE_TOPIC}" --width "${WIDTH}" --height "${HEIGHT}" --fps "${FPS}" \
+    >"${WORK}/publisher.log" 2>&1 &
+  PUB_PID=$!
+
+  log "starting ROS 1 image_rtp_adapter"
+  rosrun ros_image_rtp_adapter image_rtp_adapter \
+    _image_topic:="${IMAGE_TOPIC}" \
+    _input_message_type:=compressed \
+    _source_id:="${SOURCE_ID}" \
+    _frame_id:=camera_optical \
+    _rtp_host:=127.0.0.1 \
+    _rtp_port:="${RTP_PORT}" \
+    _control_socket:="${CONTROL_SOCKET}" \
+    _width:="${WIDTH}" \
+    _height:="${HEIGHT}" \
+    _fps:="${FPS}.0" \
+    _bitrate:=1500000 \
+    _encoder:=libx264 \
+    _ffmpeg_path:=ffmpeg \
+    _drop_to_latest:=true \
+    _require_jpeg:=true \
+    >"${WORK}/adapter.log" 2>&1 &
+  ADAPTER_PID=$!
+else
+  log "starting ROS 2 test JPEG publisher on ${IMAGE_TOPIC}"
+  # Args before --ros-args so publish_test_jpeg argparse receives them.
+  ros2 run ros_image_rtp_adapter publish_test_jpeg \
+    --topic "${IMAGE_TOPIC}" --width "${WIDTH}" --height "${HEIGHT}" --fps "${FPS}" \
+    >"${WORK}/publisher.log" 2>&1 &
+  PUB_PID=$!
+
+  log "starting ROS 2 image_rtp_adapter"
+  ros2 run ros_image_rtp_adapter image_rtp_adapter --ros-args \
+    -p image_topic:="${IMAGE_TOPIC}" \
+    -p input_message_type:=compressed \
+    -p source_id:="${SOURCE_ID}" \
+    -p frame_id:=camera_optical \
+    -p rtp_host:=127.0.0.1 \
+    -p rtp_port:="${RTP_PORT}" \
+    -p control_socket:="${CONTROL_SOCKET}" \
+    -p width:="${WIDTH}" \
+    -p height:="${HEIGHT}" \
+    -p fps:="${FPS}.0" \
+    -p bitrate:=1500000 \
+    -p encoder:=libx264 \
+    -p ffmpeg_path:=ffmpeg \
+    -p drop_to_latest:=true \
+    -p require_jpeg:=true \
+    >"${WORK}/adapter.log" 2>&1 &
+  ADAPTER_PID=$!
+fi
 
 log "waiting for control socket describe"
 if ! python3 "${SCRIPT_DIR}/wait_describe.py" \
@@ -162,22 +204,22 @@ curl -fsS "http://${EDGE_HTTP}/" | grep -qi "webrtc\|video\|session" || {
   exit 1
 }
 
-# Confirm adapter is still receiving/encoding after Edge attach.
+# No viewer exists in this contract test, so Edge deliberately leaves the
+# source inactive.  The successful describe transaction plus live publisher
+# and adapter processes are the readiness evidence; log formatting differs
+# between rospy and rclpy and must not be part of the product contract.
 sleep 2
 if ! kill -0 "${ADAPTER_PID}" 2>/dev/null; then
   log "adapter died after edge start"
   cat "${WORK}/adapter.log"
   exit 1
 fi
-if ! grep -E "frames_in=[1-9]|frames_out=[1-9]|image_rtp_adapter ready" "${WORK}/adapter.log"; then
-  # soft: at least ready line must exist
-  if ! grep -q "image_rtp_adapter ready" "${WORK}/adapter.log"; then
-    log "adapter never became ready"
-    cat "${WORK}/adapter.log"
-    exit 1
-  fi
+if ! kill -0 "${PUB_PID}" 2>/dev/null; then
+  log "test publisher died after edge start"
+  cat "${WORK}/publisher.log"
+  exit 1
 fi
 
-log "OK: describe contract + media-edge healthz + player page"
+log "OK: publisher + describe contract + media-edge healthz + player page"
 cat "${WORK}/healthz.json"
 exit 0

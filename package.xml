@@ -2,11 +2,11 @@
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
   <name>ros_image_rtp_adapter</name>
-  <version>0.2.0</version>
+  <version>0.3.0</version>
   <description>
-    Parameterized ROS CompressedImage (JPEG) to H264/RTP adapter that conforms to
-    the xgc2-media-edge source control contract. Topic names are launch/CLI
-    parameters — not hard-coded to any camera brand.
+    Parameterized ROS Image or CompressedImage (JPEG) to H264/RTP adapter that
+    conforms to the xgc2-media-edge source control contract. Topic names,
+    message type, image format, and encoder capabilities are configuration.
   </description>
 
   <maintainer email="apt@xgc2.local">XGC2</maintainer>
@@ -21,6 +21,7 @@
   <exec_depend>launch</exec_depend>
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-pil</exec_depend>
 
   <!-- Portable software backend plus generic GStreamer plugin surface. -->
   <exec_depend>ffmpeg</exec_depend>

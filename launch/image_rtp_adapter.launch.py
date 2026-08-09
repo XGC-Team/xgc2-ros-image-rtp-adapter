@@ -13,7 +13,17 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument(
                 "image_topic",
                 default_value="/camera/image_raw/compressed",
-                description="sensor_msgs/CompressedImage topic (JPEG). Fully parameterized.",
+                description="sensor_msgs/Image or CompressedImage topic.",
+            ),
+            DeclareLaunchArgument(
+                "input_message_type",
+                default_value="compressed",
+                description="Explicit ROS message contract: compressed or raw.",
+            ),
+            DeclareLaunchArgument(
+                "raw_encoding",
+                default_value="bgr8",
+                description="Packed encoding required when input_message_type=raw.",
             ),
             DeclareLaunchArgument("source_id", default_value="camera"),
             DeclareLaunchArgument("frame_id", default_value="camera_optical"),
@@ -80,10 +90,17 @@ def generate_launch_description() -> LaunchDescription:
                 parameters=[
                     {
                         "image_topic": LaunchConfiguration("image_topic"),
+                        "input_message_type": LaunchConfiguration(
+                            "input_message_type"
+                        ),
+                        "raw_encoding": LaunchConfiguration("raw_encoding"),
                         "source_id": LaunchConfiguration("source_id"),
                         "frame_id": LaunchConfiguration("frame_id"),
                         "rtp_host": LaunchConfiguration("rtp_host"),
-                        "rtp_port": ParameterValue(LaunchConfiguration("rtp_port"), value_type=int),
+                        "rtp_port": ParameterValue(
+                            LaunchConfiguration("rtp_port"),
+                            value_type=int,
+                        ),
                         "control_socket": LaunchConfiguration("control_socket"),
                         "width": ParameterValue(LaunchConfiguration("width"), value_type=int),
                         "height": ParameterValue(LaunchConfiguration("height"), value_type=int),
