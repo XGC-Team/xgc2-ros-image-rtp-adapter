@@ -1,12 +1,13 @@
 schema: xgc2.product.v1
 id: xgc2-ros-image-rtp-adapter
 name: XGC2 ROS Image RTP Adapter
-version: 0.1.1
+version: 0.2.0
 kind: ros2-apt
 summary: >-
   Parameterized ROS 2 CompressedImage (JPEG) to H264/RTP adapter implementing
-  the xgc2-media-edge source control contract. Topic names and source IDs are
-  launch parameters. Ships ROS Jazzy (noble) and ROS Humble (jammy) packages.
+  the xgc2-media-edge source control contract. Topics, source IDs, FFmpeg
+  codecs, and GStreamer software/hardware elements are deployment parameters.
+  Ships ROS Jazzy (noble) and ROS Humble (jammy) packages.
 groups:
 - ros2
 - driver
@@ -37,6 +38,11 @@ apt:
     - jammy
   depends:
   - ffmpeg
+  - gstreamer1.0-tools
+  - gstreamer1.0-plugins-base
+  - gstreamer1.0-plugins-good
+  - gstreamer1.0-plugins-bad
+  - gstreamer1.0-plugins-ugly
   - python3-numpy
   - python3-pil
   # Soft co-install with the Edge data plane. The adapter is a pure RTP source
@@ -73,5 +79,5 @@ release:
   dependency_policy:
     xgc2-media-edge: order
   apt_versions:
-    jammy: 0.1.1
-    noble: 0.1.1
+    jammy: 0.2.0
+    noble: 0.2.0

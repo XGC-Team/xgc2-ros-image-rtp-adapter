@@ -56,9 +56,11 @@ docker run --rm \
       build-essential cmake dpkg-dev fakeroot file git rsync \
       python3 python3-pip python3-colcon-common-extensions python3-pytest python3-numpy python3-pil \
       ffmpeg curl ca-certificates \
+      gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+      gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly \
       "ros-${ROS_DISTRO}-rclpy" "ros-${ROS_DISTRO}-sensor-msgs" "ros-${ROS_DISTRO}-std-msgs" \
       "ros-${ROS_DISTRO}-launch" "ros-${ROS_DISTRO}-launch-ros" "ros-${ROS_DISTRO}-ros2pkg" \
-      "ros-${ROS_DISTRO}-ament-cmake" || true
+      "ros-${ROS_DISTRO}-ament-cmake"
 
     # media-edge requires a recent Go toolchain (module go 1.22+).
     arch="$(dpkg --print-architecture)"
@@ -86,10 +88,12 @@ docker run --rm \
     source install/setup.bash
     set -u
 
-    # Pure unit tests: source-control contract and RTP producer continuity.
+    # unit tests (control socket, no ROS daemon required for pure unit)
     python3 -m pytest \
       /workspace/work/src/ros_image_rtp_adapter/test/test_control_socket.py \
       /workspace/work/src/ros_image_rtp_adapter/test/test_encoder.py -q
+    PYTHONPATH=/workspace/work/src/ros_image_rtp_adapter \
+      python3 /workspace/work/src/ros_image_rtp_adapter/scripts/integration_gstreamer_rtp.py
 
     # Stage install for deb
     mkdir -p /workspace/work/install-root

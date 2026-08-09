@@ -1,7 +1,7 @@
 schema: xgc2.product.v1
 id: xgc2-ros-humble-ros-image-rtp-adapter
 name: XGC2 ROS Image RTP Adapter for ROS Humble
-version: 0.1.1
+version: 0.2.0
 kind: ros2-apt
 summary: >-
   Parameterized ROS 2 CompressedImage (JPEG) to H264/RTP adapter (Humble/Jammy)
@@ -31,7 +31,13 @@ apt:
   - ros-humble-launch
   - ros-humble-launch-ros
   - ffmpeg
+  - gstreamer1.0-tools
+  - gstreamer1.0-plugins-base
+  - gstreamer1.0-plugins-good
+  - gstreamer1.0-plugins-bad
+  - gstreamer1.0-plugins-ugly
   - python3-numpy
+  - python3-pil
   recommends:
   - xgc2-media-edge
 usage:
@@ -56,4 +62,4 @@ release:
   dependency_policy:
     xgc2-media-edge: order
   apt_versions:
-    jammy: 0.1.1
+    jammy: 0.2.0

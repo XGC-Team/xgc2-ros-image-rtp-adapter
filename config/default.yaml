@@ -16,7 +16,24 @@ image_rtp_adapter:
     height: 720
     fps: 15.0
     bitrate: 2500000
+    encoder_backend: ffmpeg
     encoder: libx264
     ffmpeg_path: ffmpeg
+    ffmpeg_encoder_args_json: "[]"
+    ffmpeg_video_filter: ""
+    gstreamer_path: gst-launch-1.0
+    gstreamer_inspect_path: gst-inspect-1.0
+    gstreamer_jpeg_parser: jpegparse
+    gstreamer_jpeg_caps: image/jpeg,framerate=@fps_fraction
+    gstreamer_jpeg_decoder: jpegdec
+    gstreamer_video_converter: videoconvert
+    gstreamer_video_scaler: videoscale
+    gstreamer_raw_caps: >-
+      video/x-raw,format=I420,width=@width,height=@height,framerate=@fps_fraction
+    gstreamer_h264_encoder: x264enc
+    gstreamer_decoder_properties_json: "{}"
+    gstreamer_converter_properties_json: "{}"
+    gstreamer_encoder_properties_json: >-
+      {"bitrate":"@bitrate_kbps","byte-stream":true,"key-int-max":"@gop","speed-preset":"ultrafast","tune":"zerolatency"}
     drop_to_latest: true
     require_jpeg: true

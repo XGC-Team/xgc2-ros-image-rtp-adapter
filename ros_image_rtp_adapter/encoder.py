@@ -1,18 +1,199 @@
-"""JPEG bytes → H264/RTP via ffmpeg (soft-encode path, product default)."""
+"""Pluggable JPEG-bytes to H264/RTP subprocess encoders.
+
+The ROS-facing package is intentionally hardware-neutral.  FFmpeg is the
+portable software default; GStreamer element factories and properties are
+configuration so deployments can select a vendor hardware pipeline without
+putting device detection or topic names in this module.
+"""
 
 from __future__ import annotations
 
+from collections import deque
+from fractions import Fraction
+import json
+import re
 import signal
 import subprocess
 import threading
-from typing import List, Optional
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Union
 
 
-class FFmpegJpegRtpEncoder:
-    """
-    Feed complete JPEG frames on stdin; ffmpeg re-encodes to H264 and packetizes
-    RTP to a loopback destination for xgc2-media-edge.
-    """
+PropertyValue = Union[str, int, float, bool]
+PropertyInput = Union[str, Mapping[str, PropertyValue]]
+ArgumentInput = Union[str, Sequence[str]]
+
+_ELEMENT_NAME = re.compile(r"^[A-Za-z0-9_.+-]+$")
+_PROPERTY_NAME = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+
+
+def _parse_properties(value: PropertyInput, parameter_name: str) -> Dict[str, PropertyValue]:
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value or "{}")
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{parameter_name} must contain a JSON object: {exc}") from exc
+    else:
+        parsed = dict(value)
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{parameter_name} must contain a JSON object")
+
+    properties: Dict[str, PropertyValue] = {}
+    for key, property_value in parsed.items():
+        if not isinstance(key, str) or not _PROPERTY_NAME.fullmatch(key):
+            raise ValueError(f"{parameter_name} contains an invalid property name: {key!r}")
+        if not isinstance(property_value, (str, int, float, bool)):
+            raise ValueError(
+                f"{parameter_name}.{key} must be a string, number, or boolean"
+            )
+        if isinstance(property_value, str) and "\x00" in property_value:
+            raise ValueError(f"{parameter_name}.{key} must not contain NUL")
+        properties[key] = property_value
+    return properties
+
+
+def _parse_arguments(value: ArgumentInput, parameter_name: str) -> List[str]:
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value or "[]")
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{parameter_name} must contain a JSON array: {exc}") from exc
+    else:
+        parsed = list(value)
+    if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+        raise ValueError(f"{parameter_name} must contain a JSON array of strings")
+    if any("\x00" in item for item in parsed):
+        raise ValueError(f"{parameter_name} must not contain NUL")
+    return parsed
+
+
+def _validate_element_name(value: str, parameter_name: str) -> str:
+    if not _ELEMENT_NAME.fullmatch(value):
+        raise ValueError(
+            f"{parameter_name} must be a GStreamer element factory name, got {value!r}"
+        )
+    return value
+
+
+def _format_number(value: float) -> str:
+    return str(int(value)) if float(value).is_integer() else str(value)
+
+
+class SubprocessJpegRtpEncoder:
+    """Common supervised stdin/subprocess lifecycle for encoder backends."""
+
+    def __init__(self) -> None:
+        self._proc: Optional[subprocess.Popen] = None
+        self._lock = threading.Lock()
+        self._runtime_validated = False
+        self._stderr_tail = deque(maxlen=20)
+
+    @property
+    def running(self) -> bool:
+        proc = self._proc
+        return proc is not None and proc.poll() is None
+
+    @property
+    def diagnostic(self) -> str:
+        return "\n".join(self._stderr_tail)
+
+    def start(self) -> None:
+        with self._lock:
+            if self._proc is not None:
+                return
+            self._launch_locked()
+
+    def stop(self) -> None:
+        with self._lock:
+            proc = self._proc
+            self._proc = None
+        self._stop_process(proc)
+
+    def write_jpeg(self, jpeg: bytes) -> None:
+        with self._lock:
+            proc = self._proc
+            if proc is None or proc.stdin is None:
+                return
+            try:
+                proc.stdin.write(jpeg)
+                proc.stdin.flush()
+            except (BrokenPipeError, OSError):
+                self._restart_locked()
+
+    def request_keyframe(self) -> None:
+        # Stdin-driven command-line encoders expose no portable live force-IDR
+        # event. Profiles configure a one-second GOP and repeated SPS/PPS, so
+        # the next decoder-safe keyframe is bounded without replacing RTP SSRC.
+        return
+
+    def validate_runtime(self) -> None:
+        raise NotImplementedError
+
+    def _build_command(self) -> List[str]:
+        raise NotImplementedError
+
+    def _launch_locked(self) -> None:
+        if not self._runtime_validated:
+            self.validate_runtime()
+            self._runtime_validated = True
+        proc = subprocess.Popen(
+            self._build_command(),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+        )
+        self._proc = proc
+        self._stderr_tail.clear()
+        threading.Thread(target=self._drain_stderr, args=(proc,), daemon=True).start()
+
+    def _restart_locked(self) -> None:
+        proc = self._proc
+        self._proc = None
+        self._stop_process(proc, wait=False)
+        self._launch_locked()
+
+    @staticmethod
+    def _stop_process(proc: Optional[subprocess.Popen], *, wait: bool = True) -> None:
+        if proc is None:
+            return
+        try:
+            if proc.stdin:
+                proc.stdin.close()
+        except OSError:
+            pass
+        if proc.poll() is None:
+            try:
+                proc.send_signal(signal.SIGTERM)
+                if wait:
+                    proc.wait(timeout=3)
+                else:
+                    # Restart is already handling a failed producer. Reap it
+                    # promptly so bad input cannot accumulate old children.
+                    proc.kill()
+            except OSError:
+                pass
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                except OSError:
+                    pass
+        try:
+            proc.wait(timeout=1)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+    def _drain_stderr(self, proc: subprocess.Popen) -> None:
+        if proc.stderr is None:
+            return
+        try:
+            for line in iter(proc.stderr.readline, b""):
+                self._stderr_tail.append(line.decode("utf-8", errors="replace").rstrip())
+        except Exception:
+            pass
+
+
+class FFmpegJpegRtpEncoder(SubprocessJpegRtpEncoder):
+    """Portable FFmpeg backend; defaults to low-latency software x264."""
 
     def __init__(
         self,
@@ -25,7 +206,10 @@ class FFmpegJpegRtpEncoder:
         fps: float,
         bitrate: int,
         encoder: str = "libx264",
+        encoder_args: ArgumentInput = "[]",
+        video_filter: str = "",
     ) -> None:
+        super().__init__()
         self._ffmpeg_path = ffmpeg_path
         self._rtp_host = rtp_host
         self._rtp_port = int(rtp_port)
@@ -34,90 +218,40 @@ class FFmpegJpegRtpEncoder:
         self._fps = float(fps)
         self._bitrate = int(bitrate)
         self._encoder = encoder
-        self._proc: Optional[subprocess.Popen] = None
-        self._lock = threading.Lock()
+        self._encoder_args = _parse_arguments(encoder_args, "ffmpeg_encoder_args_json")
+        self._video_filter = video_filter
 
-    def start(self) -> None:
-        with self._lock:
-            if self._proc is not None:
-                return
-            cmd = self._build_command()
-            self._proc = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                bufsize=0,
+    def validate_runtime(self) -> None:
+        try:
+            result = subprocess.run(
+                [
+                    self._ffmpeg_path,
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-h",
+                    f"encoder={self._encoder}",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                check=False,
+                timeout=10,
             )
-            # Drain stderr so the pipe cannot block ffmpeg.
-            threading.Thread(target=self._drain_stderr, daemon=True).start()
-
-    def stop(self) -> None:
-        with self._lock:
-            proc = self._proc
-            self._proc = None
-        if proc is None:
-            return
-        try:
-            if proc.stdin:
-                proc.stdin.close()
-        except OSError:
-            pass
-        try:
-            proc.send_signal(signal.SIGTERM)
-            proc.wait(timeout=3)
-        except Exception:
-            try:
-                proc.kill()
-            except OSError:
-                pass
-
-    def write_jpeg(self, jpeg: bytes) -> None:
-        with self._lock:
-            proc = self._proc
-            if proc is None or proc.stdin is None:
-                return
-            try:
-                proc.stdin.write(jpeg)
-                proc.stdin.flush()
-            except BrokenPipeError:
-                self._restart_locked()
-
-    def request_keyframe(self) -> None:
-        # ffmpeg's stdin-driven soft encoder has no safe per-frame force-IDR
-        # control. Restarting ffmpeg here changes the RTP producer clock/SSRC
-        # while a WebRTC session is live and can trap the browser in a PLI ->
-        # restart loop. The command below emits an IDR with repeated SPS/PPS at
-        # least once per second, so a request is satisfied by the next bounded
-        # periodic keyframe without breaking RTP continuity.
-        return
-
-    def _restart_locked(self) -> None:
-        proc = self._proc
-        self._proc = None
-        if proc is not None:
-            try:
-                if proc.stdin:
-                    proc.stdin.close()
-            except OSError:
-                pass
-            try:
-                proc.kill()
-            except OSError:
-                pass
-        cmd = self._build_command()
-        self._proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            bufsize=0,
-        )
-        threading.Thread(target=self._drain_stderr, daemon=True).start()
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError(f"FFmpeg preflight failed: {exc}") from exc
+        output = result.stdout.decode("utf-8", errors="replace")
+        if result.returncode != 0 or "not recognized" in output.lower():
+            raise RuntimeError(
+                f"FFmpeg encoder {self._encoder!r} is unavailable: {output.strip()}"
+            )
 
     def _build_command(self) -> List[str]:
-        # image2pipe + mjpeg demux accepts concatenated JPEG frames on stdin.
+        # image2pipe + mjpeg demux accepts concatenated complete JPEG frames.
         gop = max(1, int(round(self._fps)))
+        video_filter = self._video_filter or (
+            f"scale={self._width}:{self._height}:force_original_aspect_ratio=decrease,"
+            f"pad={self._width}:{self._height}:(ow-iw)/2:(oh-ih)/2"
+        )
         command = [
             self._ffmpeg_path,
             "-hide_banner",
@@ -137,50 +271,280 @@ class FFmpegJpegRtpEncoder:
             "pipe:0",
             "-an",
             "-vf",
-            f"scale={self._width}:{self._height}:force_original_aspect_ratio=decrease,"
-            f"pad={self._width}:{self._height}:(ow-iw)/2:(oh-ih)/2",
+            video_filter,
             "-c:v",
             self._encoder,
-            "-preset",
-            "veryfast",
-            "-tune",
-            "zerolatency",
-            "-pix_fmt",
-            "yuv420p",
-            "-g",
-            str(gop),
-            "-keyint_min",
-            str(gop),
-            "-bf",
-            "0",
-            "-b:v",
-            str(self._bitrate),
-            "-maxrate",
-            str(self._bitrate),
-            "-bufsize",
-            str(self._bitrate * 2),
         ]
-        if self._encoder == "libx264":
-            command.extend([
-                "-x264-params",
-                "repeat-headers=1:scenecut=0",
-            ])
-        command.extend([
-            "-f",
-            "rtp",
-            "-payload_type",
-            "96",
-            f"rtp://{self._rtp_host}:{self._rtp_port}?pkt_size=1200",
-        ])
+
+        if self._encoder_args:
+            command.extend(self._expand_arguments(self._encoder_args, gop))
+        elif self._encoder == "libx264":
+            command.extend(
+                [
+                    "-preset",
+                    "veryfast",
+                    "-tune",
+                    "zerolatency",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-g",
+                    str(gop),
+                    "-keyint_min",
+                    str(gop),
+                    "-bf",
+                    "0",
+                    "-b:v",
+                    str(self._bitrate),
+                    "-maxrate",
+                    str(self._bitrate),
+                    "-bufsize",
+                    str(self._bitrate * 2),
+                    "-x264-params",
+                    "repeat-headers=1:scenecut=0",
+                ]
+            )
+        else:
+            # Minimal codec-level defaults. Hardware-specific flags belong in
+            # ffmpeg_encoder_args_json so no vendor assumptions leak here.
+            command.extend(["-b:v", str(self._bitrate), "-g", str(gop)])
+
+        command.extend(
+            [
+                "-f",
+                "rtp",
+                "-payload_type",
+                "96",
+                f"rtp://{self._rtp_host}:{self._rtp_port}?pkt_size=1200",
+            ]
+        )
         return command
 
-    def _drain_stderr(self) -> None:
-        proc = self._proc
-        if proc is None or proc.stderr is None:
-            return
+    def _expand_arguments(self, arguments: Sequence[str], gop: int) -> List[str]:
+        context = {
+            "@bitrate": str(self._bitrate),
+            "@bitrate_kbps": str(max(1, int(round(self._bitrate / 1000.0)))),
+            "@fps": _format_number(self._fps),
+            "@gop": str(gop),
+            "@width": str(self._width),
+            "@height": str(self._height),
+        }
+        return [context.get(argument, argument) for argument in arguments]
+
+
+class GStreamerJpegRtpEncoder(SubprocessJpegRtpEncoder):
+    """Configurable GStreamer backend for software or hardware elements."""
+
+    def __init__(
+        self,
+        *,
+        gstreamer_path: str,
+        gstreamer_inspect_path: str,
+        rtp_host: str,
+        rtp_port: int,
+        width: int,
+        height: int,
+        fps: float,
+        bitrate: int,
+        jpeg_parser: str = "jpegparse",
+        jpeg_caps: str = "image/jpeg,framerate=@fps_fraction",
+        jpeg_decoder: str = "jpegdec",
+        video_converter: str = "videoconvert",
+        video_scaler: str = "videoscale",
+        raw_caps: str = (
+            "video/x-raw,format=I420,width=@width,height=@height,framerate=@fps_fraction"
+        ),
+        h264_encoder: str = "x264enc",
+        decoder_properties: PropertyInput = "{}",
+        converter_properties: PropertyInput = "{}",
+        encoder_properties: PropertyInput = (
+            '{"bitrate":"@bitrate_kbps","byte-stream":true,'
+            '"key-int-max":"@gop","speed-preset":"ultrafast",'
+            '"tune":"zerolatency"}'
+        ),
+    ) -> None:
+        super().__init__()
+        self._gstreamer_path = gstreamer_path
+        self._gstreamer_inspect_path = gstreamer_inspect_path
+        self._rtp_host = rtp_host
+        self._rtp_port = int(rtp_port)
+        self._width = int(width)
+        self._height = int(height)
+        self._fps = float(fps)
+        self._bitrate = int(bitrate)
+        self._jpeg_parser = _validate_element_name(jpeg_parser, "gstreamer_jpeg_parser")
+        self._jpeg_caps = self._validate_caps(
+            jpeg_caps, "image/jpeg", "gstreamer_jpeg_caps"
+        )
+        self._jpeg_decoder = _validate_element_name(jpeg_decoder, "gstreamer_jpeg_decoder")
+        self._video_converter = _validate_element_name(
+            video_converter, "gstreamer_video_converter"
+        )
+        self._video_scaler = _validate_element_name(
+            video_scaler, "gstreamer_video_scaler"
+        )
+        self._h264_encoder = _validate_element_name(
+            h264_encoder, "gstreamer_h264_encoder"
+        )
+        self._raw_caps = self._validate_caps(
+            raw_caps, "video/x-raw", "gstreamer_raw_caps"
+        )
+        self._decoder_properties = _parse_properties(
+            decoder_properties, "gstreamer_decoder_properties_json"
+        )
+        self._converter_properties = _parse_properties(
+            converter_properties, "gstreamer_converter_properties_json"
+        )
+        self._encoder_properties = _parse_properties(
+            encoder_properties, "gstreamer_encoder_properties_json"
+        )
+
+    def validate_runtime(self) -> None:
         try:
-            for _line in iter(proc.stderr.readline, b""):
-                if self._proc is None:
-                    break
-        except Exception:
-            pass
+            launch_result = subprocess.run(
+                [self._gstreamer_path, "--version"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=10,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError(f"GStreamer launcher preflight failed: {exc}") from exc
+        if launch_result.returncode != 0:
+            detail = launch_result.stderr.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(
+                "GStreamer launcher preflight failed"
+                + (f": {detail}" if detail else "")
+            )
+
+        elements = [
+            "fdsrc",
+            self._jpeg_parser,
+            self._jpeg_decoder,
+            self._video_converter,
+            self._video_scaler,
+            self._h264_encoder,
+            "h264parse",
+            "rtph264pay",
+            "udpsink",
+        ]
+        for element in dict.fromkeys(elements):
+            try:
+                result = subprocess.run(
+                    [self._gstreamer_inspect_path, element],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
+                    check=False,
+                    timeout=10,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise RuntimeError(f"GStreamer preflight failed for {element}: {exc}") from exc
+            if result.returncode != 0:
+                detail = result.stderr.decode("utf-8", errors="replace").strip()
+                raise RuntimeError(
+                    f"GStreamer element {element!r} is unavailable"
+                    + (f": {detail}" if detail else "")
+                )
+
+    def _build_command(self) -> List[str]:
+        command = [
+            self._gstreamer_path,
+            "-q",
+            "fdsrc",
+            "fd=0",
+            "do-timestamp=true",
+            "!",
+            self._expanded_caps(self._jpeg_caps),
+            "!",
+            self._jpeg_parser,
+            "!",
+            self._jpeg_decoder,
+        ]
+        command.extend(self._property_arguments(self._decoder_properties))
+        command.extend(["!", self._video_converter])
+        command.extend(self._property_arguments(self._converter_properties))
+        command.extend(
+            [
+                "!",
+                self._video_scaler,
+                "!",
+                self._expanded_caps(self._raw_caps),
+                "!",
+                self._h264_encoder,
+            ]
+        )
+        command.extend(self._property_arguments(self._encoder_properties))
+        command.extend(
+            [
+                "!",
+                "h264parse",
+                "config-interval=-1",
+                "!",
+                "video/x-h264,stream-format=byte-stream,alignment=au",
+                "!",
+                "rtph264pay",
+                "pt=96",
+                "mtu=1200",
+                "config-interval=-1",
+                "!",
+                "udpsink",
+                f"host={self._rtp_host}",
+                f"port={self._rtp_port}",
+                "sync=false",
+                "async=false",
+            ]
+        )
+        return command
+
+    @staticmethod
+    def _validate_caps(value: str, media_type: str, parameter_name: str) -> str:
+        if not value.startswith(media_type):
+            raise ValueError(f"{parameter_name} must start with {media_type}")
+        if "!" in value or "\x00" in value or "\n" in value or "\r" in value:
+            raise ValueError(f"{parameter_name} contains a forbidden pipeline separator")
+        return value
+
+    def _expanded_caps(self, template: str) -> str:
+        fps_fraction = Fraction(str(self._fps)).limit_denominator(1001)
+        replacements = {
+            "@width": str(self._width),
+            "@height": str(self._height),
+            "@fps_fraction": f"{fps_fraction.numerator}/{fps_fraction.denominator}",
+            "@fps": _format_number(self._fps),
+        }
+        caps = template
+        for marker, replacement in replacements.items():
+            caps = caps.replace(marker, replacement)
+        return caps
+
+    def _property_arguments(self, properties: Mapping[str, PropertyValue]) -> List[str]:
+        gop = max(1, int(round(self._fps)))
+        context: Dict[str, PropertyValue] = {
+            "@bitrate": self._bitrate,
+            "@bitrate_kbps": max(1, int(round(self._bitrate / 1000.0))),
+            "@fps": self._fps,
+            "@gop": gop,
+            "@width": self._width,
+            "@height": self._height,
+        }
+        arguments = []
+        for key, value in properties.items():
+            expanded = context.get(value, value) if isinstance(value, str) else value
+            if isinstance(expanded, bool):
+                rendered = "true" if expanded else "false"
+            elif isinstance(expanded, float):
+                rendered = _format_number(expanded)
+            else:
+                rendered = str(expanded)
+            arguments.append(f"{key}={rendered}")
+        return arguments
+
+
+def create_jpeg_rtp_encoder(*, backend: str, **kwargs: Any) -> SubprocessJpegRtpEncoder:
+    """Create a backend without auto-detecting a vendor or device model."""
+
+    normalized = backend.strip().lower()
+    if normalized == "ffmpeg":
+        return FFmpegJpegRtpEncoder(**kwargs)
+    if normalized == "gstreamer":
+        return GStreamerJpegRtpEncoder(**kwargs)
+    raise ValueError("encoder_backend must be one of: ffmpeg, gstreamer")

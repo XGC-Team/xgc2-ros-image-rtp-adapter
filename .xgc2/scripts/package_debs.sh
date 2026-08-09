@@ -81,7 +81,7 @@ if ! find "${PKG_ROOT}${PREFIX}" -type f -name 'node.py' | grep -q .; then
   exit 1
 fi
 
-DEPENDS="ros-${ROS_DISTRO}-rclpy, ros-${ROS_DISTRO}-sensor-msgs, ros-${ROS_DISTRO}-std-msgs, ros-${ROS_DISTRO}-launch, ros-${ROS_DISTRO}-launch-ros, ffmpeg, python3-numpy, python3-pil"
+DEPENDS="ros-${ROS_DISTRO}-rclpy, ros-${ROS_DISTRO}-sensor-msgs, ros-${ROS_DISTRO}-std-msgs, ros-${ROS_DISTRO}-launch, ros-${ROS_DISTRO}-launch-ros, ffmpeg, python3-numpy, python3-pil, gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly"
 
 cat >"${PKG_ROOT}/DEBIAN/control" <<EOF
 Package: ${PACKAGE}
@@ -91,9 +91,9 @@ Priority: optional
 Architecture: ${ARCH}
 Maintainer: XGC2 <apt@xgc2.local>
 Depends: ${DEPENDS}
-Description: XGC2 ROS CompressedImage JPEG to media-edge H264/RTP adapter
+Description: XGC2 ROS JPEG to media-edge H264/RTP adapter
  Parameterized bridge from sensor_msgs/CompressedImage to the xgc2-media-edge
- source contract (H264/RTP + Unix control socket).
+ source contract with configurable FFmpeg or GStreamer encoder backends.
 EOF
 
 printf '%s\n' "${PACKAGE}" >"${PKG_ROOT}/usr/share/doc/${PACKAGE}/README"

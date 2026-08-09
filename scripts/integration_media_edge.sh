@@ -8,6 +8,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 ROS_DISTRO="${ROS_DISTRO:-jazzy}"
 MEDIA_EDGE_DIR="${MEDIA_EDGE_DIR:-}"
+MEDIA_EDGE_BINARY="${MEDIA_EDGE_BINARY:-}"
 SOURCE_ID="${SOURCE_ID:-ci_camera}"
 RTP_PORT="${RTP_PORT:-15004}"
 CONTROL_SOCKET="${CONTROL_SOCKET:-/tmp/xgc2-image-rtp-ci.sock}"
@@ -39,13 +40,19 @@ if [[ -z "${MEDIA_EDGE_DIR}" ]]; then
     MEDIA_EDGE_DIR="$(cd "${REPO_ROOT}/../../common/media-edge" && pwd)"
   fi
 fi
-if [[ -z "${MEDIA_EDGE_DIR}" || ! -d "${MEDIA_EDGE_DIR}" ]]; then
+if [[ -z "${MEDIA_EDGE_BINARY}" && ( -z "${MEDIA_EDGE_DIR}" || ! -d "${MEDIA_EDGE_DIR}" ) ]]; then
   echo "MEDIA_EDGE_DIR not set and media-edge not found next to product" >&2
+  exit 1
+fi
+if [[ -n "${MEDIA_EDGE_BINARY}" && ! -x "${MEDIA_EDGE_BINARY}" ]]; then
+  echo "MEDIA_EDGE_BINARY is not executable: ${MEDIA_EDGE_BINARY}" >&2
   exit 1
 fi
 
 command -v ffmpeg >/dev/null
-command -v go >/dev/null
+if [[ -z "${MEDIA_EDGE_BINARY}" ]]; then
+  command -v go >/dev/null
+fi
 command -v curl >/dev/null
 command -v python3 >/dev/null
 
@@ -61,11 +68,16 @@ elif [[ -f "${WORKSPACE_INSTALL:-}/setup.bash" ]]; then
 fi
 set -u
 
-log "building media-edge from ${MEDIA_EDGE_DIR}"
-(
-  cd "${MEDIA_EDGE_DIR}"
-  go build -o "${WORK}/xgc-media-edge" ./cmd/xgc-media-edge
-)
+if [[ -n "${MEDIA_EDGE_BINARY}" ]]; then
+  log "using media-edge binary ${MEDIA_EDGE_BINARY}"
+  cp "${MEDIA_EDGE_BINARY}" "${WORK}/xgc-media-edge"
+else
+  log "building media-edge from ${MEDIA_EDGE_DIR}"
+  (
+    cd "${MEDIA_EDGE_DIR}"
+    go build -o "${WORK}/xgc-media-edge" ./cmd/xgc-media-edge
+  )
+fi
 
 log "starting test JPEG publisher on ${IMAGE_TOPIC}"
 # Args before --ros-args so publish_test_jpeg argparse receives them.

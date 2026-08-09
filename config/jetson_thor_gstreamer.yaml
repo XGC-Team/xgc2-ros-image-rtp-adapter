@@ -1,0 +1,22 @@
+# Optional deployment profile for Jetson Thor / JetPack 7.x.
+#
+# This file is deliberately separate from the portable defaults. The adapter
+# code performs no NVIDIA or board-model detection: a Session/deployment may
+# opt into this profile only after gst-inspect confirms all three NVIDIA
+# element factories are present in its container.
+image_rtp_adapter:
+  ros__parameters:
+    encoder_backend: gstreamer
+    gstreamer_jpeg_parser: jpegparse
+    gstreamer_jpeg_caps: image/jpeg,framerate=@fps_fraction
+    gstreamer_jpeg_decoder: nvjpegdec
+    gstreamer_video_converter: nvvidconv
+    # nvvidconv already scales in NVMM; identity preserves that memory path.
+    gstreamer_video_scaler: identity
+    gstreamer_raw_caps: >-
+      video/x-raw(memory:NVMM),format=NV12,width=@width,height=@height,framerate=@fps_fraction
+    gstreamer_h264_encoder: nvv4l2h264enc
+    gstreamer_decoder_properties_json: "{}"
+    gstreamer_converter_properties_json: "{}"
+    gstreamer_encoder_properties_json: >-
+      {"control-rate":1,"bitrate":"@bitrate","iframeinterval":"@gop","idrinterval":"@gop","insert-sps-pps":true}

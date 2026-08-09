@@ -129,7 +129,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Unit tests (control socket and RTP continuity)
+      - name: Unit tests (control socket and encoder backends)
         run: |
           set -euo pipefail
           python3 -m pip install --user pytest
