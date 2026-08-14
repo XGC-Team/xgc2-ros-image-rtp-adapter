@@ -67,6 +67,7 @@ SOURCES_CONFIG="${RUN_DIR}/media-edge-sources.json"
 
 EDGE_BINARY_TEMP=""
 
+# shellcheck disable=SC2317 # This callback is invoked indirectly by EXIT trap.
 cleanup() {
   set +e
   log "stopping..."

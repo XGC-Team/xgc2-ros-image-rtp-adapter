@@ -29,6 +29,7 @@ if [[ -n "${CONTROL_SOCKET+x}" ]]; then
   echo "CONTROL_SOCKET is run-owned and cannot be overridden" >&2
   exit 1
 fi
+# shellcheck disable=SC2317 # This callback is invoked indirectly by EXIT trap.
 cleanup() {
   set +e
   [[ -n "${PUB_PID:-}" ]] && kill "${PUB_PID}" 2>/dev/null
