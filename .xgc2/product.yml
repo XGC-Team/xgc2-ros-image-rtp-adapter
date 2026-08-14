@@ -1,8 +1,8 @@
 schema: xgc2.product.v1
 id: xgc2-ros-image-rtp-adapter
 name: XGC2 ROS Image RTP Adapter
-version: 0.3.0
-kind: ros2-apt
+version: 0.4.0
+kind: mixed
 summary: >-
   Parameterized ROS 1/ROS 2 Image or CompressedImage to H264/RTP adapter
   implementing the xgc2-media-edge source control contract. Topics, message
@@ -13,10 +13,6 @@ groups:
 - ros2
 - driver
 - media
-ros:
-  distro: jazzy
-  packages:
-  - ros_image_rtp_adapter
 apt:
   distribution: focal,jammy,noble
   install:
@@ -46,6 +42,7 @@ apt:
     - jammy
   depends:
   - ffmpeg
+  - libavcodec-extra
   - gstreamer1.0-tools
   - gstreamer1.0-plugins-base
   - gstreamer1.0-plugins-good
@@ -53,6 +50,18 @@ apt:
   - gstreamer1.0-plugins-ugly
   - python3-numpy
   - python3-pil
+  - ros-noetic-rospy
+  - ros-noetic-sensor-msgs
+  - ros-humble-rclpy
+  - ros-humble-sensor-msgs
+  - ros-humble-std-msgs
+  - ros-humble-launch
+  - ros-humble-launch-ros
+  - ros-jazzy-rclpy
+  - ros-jazzy-sensor-msgs
+  - ros-jazzy-std-msgs
+  - ros-jazzy-launch
+  - ros-jazzy-launch-ros
   # Soft co-install with the Edge data plane. The adapter is a pure RTP source
   # and does not hard-Depends on media-edge at package install time.
   recommends:
@@ -74,24 +83,35 @@ ownership:
   - /opt/ros/noetic/lib/ros_image_rtp_adapter
   - /opt/ros/noetic/share/ros_image_rtp_adapter
   - /opt/ros/noetic/lib/python3/dist-packages/ros_image_rtp_adapter
+  - /opt/ros/noetic/lib/pkgconfig/ros_image_rtp_adapter.pc
+  - /opt/ros/humble/lib/ros_image_rtp_adapter
+  - /opt/ros/humble/share/ros_image_rtp_adapter
+  - /opt/ros/humble/lib/python3.10/site-packages/ros_image_rtp_adapter
+  - /opt/ros/humble/lib/python3.10/site-packages/ros_image_rtp_adapter-0.4.0-py3.10.egg-info
+  - /opt/ros/humble/share/ament_index/resource_index/packages/ros_image_rtp_adapter
+  - /opt/ros/humble/share/colcon-core/packages/ros_image_rtp_adapter
   - /opt/ros/jazzy/lib/ros_image_rtp_adapter
   - /opt/ros/jazzy/share/ros_image_rtp_adapter
   - /opt/ros/jazzy/lib/python3.12/site-packages/ros_image_rtp_adapter
-  - /opt/ros/humble/lib/ros_image_rtp_adapter
-  - /opt/ros/humble/share/ros_image_rtp_adapter
+  - /opt/ros/jazzy/lib/python3.12/site-packages/ros_image_rtp_adapter-0.4.0-py3.12.egg-info
+  - /opt/ros/jazzy/share/ament_index/resource_index/packages/ros_image_rtp_adapter
+  - /opt/ros/jazzy/share/colcon-core/packages/ros_image_rtp_adapter
+  - /usr/share/doc/ros-noetic-xgc2-ros-image-rtp-adapter
+  - /usr/share/doc/ros-humble-xgc2-ros-image-rtp-adapter
+  - /usr/share/doc/ros-jazzy-xgc2-ros-image-rtp-adapter
 release:
   repository: lxk36/xgc2-ros-image-rtp-adapter
   ref: jazzy
   workflow: release.yml
   ci_workflow: ci.yml
-  # Integration scripts and CI clone/run xgc2-media-edge. Declare the product
-  # edge so the release train can order media-edge before this adapter without
-  # forcing a rebuild when Edge changes (contract is interface-stable).
+  # Push CI uses the exact Media Edge source in integration-lock.json. Release
+  # train compatibility runs install the candidate from the signed staging APT
+  # repository and exercise that installed package end to end.
   requires:
   - xgc2-media-edge
   dependency_policy:
-    xgc2-media-edge: order
+    xgc2-media-edge: verify
   apt_versions:
-    focal: 0.3.0
-    jammy: 0.3.0
-    noble: 0.3.0
+    focal: 0.4.0
+    jammy: 0.4.0
+    noble: 0.4.0

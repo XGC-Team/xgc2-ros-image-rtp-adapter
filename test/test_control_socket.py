@@ -1,6 +1,7 @@
 import json
 import os
 import socket
+import stat
 import tempfile
 import time
 import unittest
@@ -58,6 +59,7 @@ class ControlSocketTest(unittest.TestCase):
         )
         server.start()
         try:
+            self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
             self.assertFalse(server.active)
             desc = _request(path, {"operation": "describe"})
             self.assertTrue(desc["ok"])
@@ -79,6 +81,50 @@ class ControlSocketTest(unittest.TestCase):
             self.assertIn("boolean", resp["error"])
         finally:
             server.stop()
+
+    def test_start_refuses_existing_path_without_deleting_it(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "source.sock")
+            with open(path, "wb") as existing:
+                existing.write(b"owned by another process")
+            server = SourceControlServer(
+                path,
+                SourceDescription("camera", "127.0.0.1", 5004, 640, 360, 10, "camera"),
+            )
+            with self.assertRaises(FileExistsError):
+                server.start()
+            with open(path, "rb") as existing:
+                self.assertEqual(existing.read(), b"owned by another process")
+
+    def test_start_refuses_symlink_parent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            real_parent = os.path.join(directory, "real")
+            linked_parent = os.path.join(directory, "linked")
+            os.mkdir(real_parent)
+            os.symlink(real_parent, linked_parent)
+            path = os.path.join(linked_parent, "source.sock")
+            server = SourceControlServer(
+                path,
+                SourceDescription("camera", "127.0.0.1", 5004, 640, 360, 10, "camera"),
+            )
+            with self.assertRaises(OSError):
+                server.start()
+            self.assertFalse(os.path.lexists(os.path.join(real_parent, "source.sock")))
+
+    def test_stop_does_not_delete_replacement_entry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "source.sock")
+            server = SourceControlServer(
+                path,
+                SourceDescription("camera", "127.0.0.1", 5004, 640, 360, 10, "camera"),
+            )
+            server.start()
+            os.unlink(path)
+            with open(path, "wb") as replacement:
+                replacement.write(b"replacement")
+            server.stop()
+            with open(path, "rb") as replacement:
+                self.assertEqual(replacement.read(), b"replacement")
 
     def test_failed_activation_keeps_server_available_and_inactive(self):
         fd, path = tempfile.mkstemp(prefix="xgc2-image-rtp-", suffix=".sock")

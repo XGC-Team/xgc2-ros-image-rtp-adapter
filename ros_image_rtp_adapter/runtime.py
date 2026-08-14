@@ -10,8 +10,8 @@ from typing import Callable, Deque, Dict, Optional
 
 from ros_image_rtp_adapter.control_socket import SourceControlServer, SourceDescription
 from ros_image_rtp_adapter.encoder import (
-    SubprocessJpegRtpEncoder,
-    create_jpeg_rtp_encoder,
+    SubprocessRtpEncoder,
+    create_rtp_encoder,
 )
 from ros_image_rtp_adapter.frames import (
     FrameValidationError,
@@ -23,7 +23,7 @@ from ros_image_rtp_adapter.settings import AdapterSettings
 
 
 LogFunction = Callable[[str], None]
-EncoderFactory = Callable[..., SubprocessJpegRtpEncoder]
+EncoderFactory = Callable[..., SubprocessRtpEncoder]
 
 
 @dataclass(frozen=True)
@@ -43,7 +43,7 @@ class ImageRtpAdapterRuntime:
         log_info: Optional[LogFunction] = None,
         log_warning: Optional[LogFunction] = None,
         log_error: Optional[LogFunction] = None,
-        encoder_factory: EncoderFactory = create_jpeg_rtp_encoder,
+        encoder_factory: EncoderFactory = create_rtp_encoder,
     ) -> None:
         self.settings = settings
         self._log_info = log_info or (lambda _message: None)
@@ -84,7 +84,7 @@ class ImageRtpAdapterRuntime:
         )
 
     @property
-    def encoder(self) -> SubprocessJpegRtpEncoder:
+    def encoder(self) -> SubprocessRtpEncoder:
         return self._encoder
 
     def start(self) -> None:

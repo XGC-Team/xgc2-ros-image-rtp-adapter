@@ -76,12 +76,11 @@ capability profile. FFmpeg validates the configured encoder; GStreamer checks
 every selected element factory and every configured property with
 `gst-inspect-1.0` before the control socket becomes ready.
 
-`config/jetson_nvmm_gstreamer.yaml` is the shared NVIDIA capability profile for
+`config/jetson_nvmm_gstreamer.yaml` is the single NVIDIA capability profile for
 Jetson AGX Orin and Jetson Thor. It requests
 `nvjpegdec -> nvvidconv -> nvv4l2h264enc` for JPEG input, or
 `rawvideoparse -> nvvidconv -> nvv4l2h264enc` for raw input. The runtime does
-not inspect a board model. `config/jetson_thor_gstreamer.yaml` remains as a
-compatibility alias for existing process definitions.
+not inspect a board model; deployments select this capability explicitly.
 
 NVIDIA documents these accelerated GStreamer elements for
 [Jetson Linux r36.4.4 (Orin)](https://docs.nvidia.com/jetson/archives/r36.4.4/DeveloperGuide/SD/Multimedia/AcceleratedGstreamer.html)
@@ -236,19 +235,32 @@ The CI and release matrices cover:
 
 Every cell builds a real DEB, installs it in its matching ROS/Ubuntu image,
 runs the shared unit suite, proves JPEG and raw GStreamer RTP emission, and
-runs publisher -> adapter -> Media Edge contract integration.
+runs publisher -> adapter -> Media Edge contract integration from the installed
+`/opt/ros/<distro>` package in a workspace-free environment. Push CI uses the
+hash-pinned Media Edge source; release-train compatibility jobs install the
+signed staging APT candidate and never fall back to that source lock. ROS base
+images and the Go toolchain archive are digest/hash pinned. Package
+staging uses an exact file manifest, rejects caches or foreign files, and builds
+the DEB twice under one `SOURCE_DATE_EPOCH` to prove deterministic output.
 
 Local focused gates:
 
 ```bash
 PYTHONPATH=. python3 -m pytest \
+  test/test_artifact_manifest.py \
   test/test_control_socket.py test/test_encoder.py \
-  test/test_frames.py test/test_runtime.py -q
+  test/test_frames.py test/test_media_edge_source_roster.py \
+  test/test_runtime.py -q
 ./.xgc2/scripts/check_package_compliance.sh
 
 # Full container package/integration gate
+dependency_set_digest="$(python3 .xgc2/scripts/read_integration_lock.py \
+  --lock .xgc2/integration-lock.json --field dependencySetDigest)"
 ./.xgc2/scripts/build_debs_in_docker.sh \
-  --ros-distro jazzy --ubuntu noble
+  --ros-distro jazzy --ubuntu noble \
+  --prepare-action ci \
+  --dependency-mode locked-source \
+  --dependency-set-digest "${dependency_set_digest}"
 ```
 
 ## License

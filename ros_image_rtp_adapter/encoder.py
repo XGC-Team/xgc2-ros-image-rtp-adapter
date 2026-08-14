@@ -103,13 +103,8 @@ def packed_frame_bytes(input_format: str, width: int, height: int) -> int:
     return int(width) * int(height) * _RAW_INPUTS[normalized][2]
 
 
-class SubprocessJpegRtpEncoder:
-    """Common supervised stdin/subprocess lifecycle for encoder backends.
-
-    The historical class name remains public for compatibility. Instances now
-    accept either complete JPEGs or fixed-size packed raw frames selected by
-    the explicit ``input_format`` constructor argument.
-    """
+class SubprocessRtpEncoder:
+    """Common supervised stdin/subprocess lifecycle for encoder backends."""
 
     def __init__(self) -> None:
         self._proc: Optional[subprocess.Popen] = None
@@ -157,11 +152,6 @@ class SubprocessJpegRtpEncoder:
                 proc.stdin.flush()
             except (BrokenPipeError, OSError):
                 self._restart_locked()
-
-    def write_jpeg(self, jpeg: bytes) -> None:
-        """Compatibility wrapper for pre-0.3 callers."""
-
-        self.write_frame(jpeg)
 
     def request_keyframe(self) -> None:
         # Stdin-driven command-line encoders expose no portable live force-IDR
@@ -236,7 +226,7 @@ class SubprocessJpegRtpEncoder:
             pass
 
 
-class FFmpegJpegRtpEncoder(SubprocessJpegRtpEncoder):
+class FFmpegRtpEncoder(SubprocessRtpEncoder):
     """Portable FFmpeg backend; defaults to low-latency software x264."""
 
     def __init__(
@@ -394,7 +384,7 @@ class FFmpegJpegRtpEncoder(SubprocessJpegRtpEncoder):
         return [context.get(argument, argument) for argument in arguments]
 
 
-class GStreamerJpegRtpEncoder(SubprocessJpegRtpEncoder):
+class GStreamerRtpEncoder(SubprocessRtpEncoder):
     """Configurable GStreamer backend for software or hardware elements."""
 
     def __init__(
@@ -658,12 +648,12 @@ class GStreamerJpegRtpEncoder(SubprocessJpegRtpEncoder):
         return arguments
 
 
-def create_jpeg_rtp_encoder(*, backend: str, **kwargs: Any) -> SubprocessJpegRtpEncoder:
+def create_rtp_encoder(*, backend: str, **kwargs: Any) -> SubprocessRtpEncoder:
     """Create a backend without auto-detecting a vendor or device model."""
 
     normalized = backend.strip().lower()
     if normalized == "ffmpeg":
-        return FFmpegJpegRtpEncoder(**kwargs)
+        return FFmpegRtpEncoder(**kwargs)
     if normalized == "gstreamer":
-        return GStreamerJpegRtpEncoder(**kwargs)
+        return GStreamerRtpEncoder(**kwargs)
     raise ValueError("encoder_backend must be one of: ffmpeg, gstreamer")

@@ -9,7 +9,7 @@ import time
 
 from PIL import Image, ImageDraw
 
-from ros_image_rtp_adapter.encoder import GStreamerJpegRtpEncoder
+from ros_image_rtp_adapter.encoder import GStreamerRtpEncoder
 
 
 def make_jpeg(frame: int, width: int, height: int) -> bytes:
@@ -36,7 +36,7 @@ def collect_packets(input_format: str):
     receiver.bind(("127.0.0.1", 0))
     receiver.setblocking(False)
     rtp_port = int(receiver.getsockname()[1])
-    encoder = GStreamerJpegRtpEncoder(
+    encoder = GStreamerRtpEncoder(
         gstreamer_path="gst-launch-1.0",
         gstreamer_inspect_path="gst-inspect-1.0",
         rtp_host="127.0.0.1",

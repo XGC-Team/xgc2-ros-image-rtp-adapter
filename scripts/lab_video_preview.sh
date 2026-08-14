@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC1090,SC2191 # Dynamic ROS setup and literal ROS argument arrays.
 # Lab preview: fake JPEG ROS2 topic → image_rtp_adapter → media-edge.
 # Intended to run inside a ROS 2 Jazzy container (or host with ROS 2 + go + ffmpeg).
 # Keeps processes alive for browser preview until SIGINT/SIGTERM.
@@ -12,7 +13,6 @@ MEDIA_EDGE_DIR="${MEDIA_EDGE_DIR:-}"
 MEDIA_EDGE_BINARY="${MEDIA_EDGE_BINARY:-}"
 SOURCE_ID="${SOURCE_ID:-lab_camera}"
 RTP_PORT="${RTP_PORT:-15004}"
-CONTROL_SOCKET="${CONTROL_SOCKET:-/tmp/xgc2-lab-image-rtp.sock}"
 # Bind all interfaces so host browser can reach a container (use host net or -p).
 EDGE_HTTP="${EDGE_HTTP:-0.0.0.0:18090}"
 IMAGE_TOPIC="${IMAGE_TOPIC:-/lab/image/compressed}"
@@ -24,6 +24,15 @@ ENCODER_BACKEND="${ENCODER_BACKEND:-ffmpeg}"
 ENCODER="${ENCODER:-libx264}"
 ENCODER_PARAMS_FILE="${ENCODER_PARAMS_FILE:-}"
 WORK="${WORK:-/tmp/xgc2-lab-video-preview}"
+
+case "${WORK}" in
+  /*) ;;
+  *) echo "WORK must be an absolute path: ${WORK}" >&2; exit 1 ;;
+esac
+if [[ -n "${CONTROL_SOCKET+x}" ]]; then
+  echo "CONTROL_SOCKET is run-owned and cannot be overridden" >&2
+  exit 1
+fi
 
 if [[ -z "${MEDIA_EDGE_DIR}" ]]; then
   if [[ -d "${ADAPTER_ROOT}/../../common/media-edge" ]]; then
@@ -52,7 +61,11 @@ fi
 log() { printf '[lab-video] %s\n' "$*"; }
 
 mkdir -p "${WORK}"
-rm -f "${CONTROL_SOCKET}"
+RUN_DIR="$(mktemp -d "${WORK}/run.XXXXXX")"
+CONTROL_SOCKET="${RUN_DIR}/adapter-control.sock"
+SOURCES_CONFIG="${RUN_DIR}/media-edge-sources.json"
+
+EDGE_BINARY_TEMP=""
 
 cleanup() {
   set +e
@@ -61,11 +74,16 @@ cleanup() {
   [[ -n "${ADAPTER_PID:-}" ]] && kill "${ADAPTER_PID}" 2>/dev/null
   [[ -n "${EDGE_PID:-}" ]] && kill "${EDGE_PID}" 2>/dev/null
   wait 2>/dev/null || true
-  rm -f "${CONTROL_SOCKET}"
+  if [[ -n "${EDGE_BINARY_TEMP}" ]]; then
+    rm -f -- "${EDGE_BINARY_TEMP}"
+  fi
+  rm -rf -- "${RUN_DIR}"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
-for bin in colcon curl python3 rsync; do
+for bin in colcon curl mktemp python3 rsync; do
   command -v "${bin}" >/dev/null || {
     echo "missing required binary: ${bin}" >&2
     exit 1
@@ -99,19 +117,23 @@ set +u
 source "${WORK}/install/setup.bash"
 set -u
 
+EDGE_BINARY_TEMP="$(mktemp "${WORK}/.xgc-media-edge.XXXXXX")"
 if [[ -n "${MEDIA_EDGE_BINARY}" ]]; then
-  cp "${MEDIA_EDGE_BINARY}" "${WORK}/xgc-media-edge"
-elif [[ ! -x "${WORK}/xgc-media-edge" ]]; then
+  cp -- "${MEDIA_EDGE_BINARY}" "${EDGE_BINARY_TEMP}"
+else
   command -v go >/dev/null || {
-    echo "missing go and no prebuilt ${WORK}/xgc-media-edge" >&2
+    echo "missing go and no explicit MEDIA_EDGE_BINARY" >&2
     exit 1
   }
   log "building media-edge"
   (
     cd "${MEDIA_EDGE_DIR}"
-    go build -o "${WORK}/xgc-media-edge" ./cmd/xgc-media-edge
+    go build -o "${EDGE_BINARY_TEMP}" ./cmd/xgc-media-edge
   )
 fi
+chmod 0755 "${EDGE_BINARY_TEMP}"
+mv -f -- "${EDGE_BINARY_TEMP}" "${WORK}/xgc-media-edge"
+EDGE_BINARY_TEMP=""
 
 log "publisher ${IMAGE_TOPIC} ${WIDTH}x${HEIGHT}@${FPS}"
 ros2 run ros_image_rtp_adapter publish_test_jpeg \
@@ -158,6 +180,12 @@ python3 "${SCRIPT_DIR}/wait_describe.py" \
   --rtp-port "${RTP_PORT}" \
   --timeout 90
 
+python3 "${SCRIPT_DIR}/write_media_edge_source_roster.py" \
+  --output "${SOURCES_CONFIG}" \
+  --source-id "${SOURCE_ID}" \
+  --rtp-port "${RTP_PORT}" \
+  --control-socket "${CONTROL_SOCKET}"
+
 log "media-edge http://${EDGE_HTTP}/  source=${SOURCE_ID}"
 # public-ip helps host-browser WebRTC ICE when Edge is in a container/host net.
 PUBLIC_IP_ARGS=()
@@ -166,17 +194,17 @@ if [[ -n "${PUBLIC_IP:-}" ]]; then
 fi
 "${WORK}/xgc-media-edge" \
   -control-address "${EDGE_HTTP}" \
-  -source-id "${SOURCE_ID}" \
-  -rtp-listen-address "127.0.0.1:${RTP_PORT}" \
-  -source-control-socket "${CONTROL_SOCKET}" \
+  -sources-config "${SOURCES_CONFIG}" \
   "${PUBLIC_IP_ARGS[@]}" \
   >"${WORK}/edge.log" 2>&1 &
 EDGE_PID=$!
 
 deadline=$((SECONDS + 60))
+healthy=0
 while (( SECONDS < deadline )); do
   if curl -fsS "http://127.0.0.1:${EDGE_HTTP##*:}/healthz" >/dev/null 2>&1 \
     || curl -fsS "http://${EDGE_HTTP}/healthz" >/dev/null 2>&1; then
+    healthy=1
     break
   fi
   if ! kill -0 "${EDGE_PID}" 2>/dev/null; then
@@ -186,6 +214,11 @@ while (( SECONDS < deadline )); do
   fi
   sleep 0.3
 done
+if [[ "${healthy}" != "1" ]]; then
+  log "media-edge healthz never became ready"
+  cat "${WORK}/edge.log" || true
+  exit 1
+fi
 
 PORT="${EDGE_HTTP##*:}"
 log "READY ${ENCODER_BACKEND} lab preview"

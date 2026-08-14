@@ -3,14 +3,14 @@ from unittest.mock import Mock, patch
 import pytest
 
 from ros_image_rtp_adapter.encoder import (
-    FFmpegJpegRtpEncoder,
-    GStreamerJpegRtpEncoder,
-    create_jpeg_rtp_encoder,
+    FFmpegRtpEncoder,
+    GStreamerRtpEncoder,
+    create_rtp_encoder,
 )
 
 
 def make_encoder(*, encoder="libx264"):
-    return FFmpegJpegRtpEncoder(
+    return FFmpegRtpEncoder(
         ffmpeg_path="ffmpeg",
         rtp_host="127.0.0.1",
         rtp_port=5004,
@@ -34,7 +34,7 @@ def make_gstreamer_encoder(**overrides):
         "bitrate": 2_500_000,
     }
     values.update(overrides)
-    return GStreamerJpegRtpEncoder(**values)
+    return GStreamerRtpEncoder(**values)
 
 
 def test_soft_encoder_uses_one_second_repeated_header_gop():
@@ -53,7 +53,7 @@ def test_keyframe_request_does_not_restart_live_ffmpeg_process():
 
     with patch("ros_image_rtp_adapter.encoder.subprocess.Popen") as popen:
         encoder.request_keyframe()
-        encoder.write_jpeg(b"jpeg")
+        encoder.write_frame(b"jpeg")
 
     popen.assert_not_called()
     process.stdin.write.assert_called_once_with(b"jpeg")
@@ -67,7 +67,7 @@ def test_non_x264_encoder_does_not_receive_x264_only_options():
 
 
 def test_ffmpeg_raw_input_is_explicit_fixed_size_and_never_roundtrips_through_jpeg():
-    command = FFmpegJpegRtpEncoder(
+    command = FFmpegRtpEncoder(
         ffmpeg_path="ffmpeg",
         rtp_host="127.0.0.1",
         rtp_port=5004,
@@ -85,7 +85,7 @@ def test_ffmpeg_raw_input_is_explicit_fixed_size_and_never_roundtrips_through_jp
 
 
 def test_ffmpeg_custom_arguments_expand_backend_neutral_runtime_markers():
-    encoder = FFmpegJpegRtpEncoder(
+    encoder = FFmpegRtpEncoder(
         ffmpeg_path="ffmpeg",
         rtp_host="127.0.0.1",
         rtp_port=5004,
@@ -175,7 +175,7 @@ def test_json_configuration_rejects_non_scalar_gstreamer_properties():
 
 
 def test_backend_factory_never_auto_detects_hardware():
-    encoder = create_jpeg_rtp_encoder(
+    encoder = create_rtp_encoder(
         backend="ffmpeg",
         ffmpeg_path="ffmpeg",
         rtp_host="127.0.0.1",
@@ -185,10 +185,10 @@ def test_backend_factory_never_auto_detects_hardware():
         fps=10.0,
         bitrate=1_000_000,
     )
-    assert isinstance(encoder, FFmpegJpegRtpEncoder)
+    assert isinstance(encoder, FFmpegRtpEncoder)
 
     with pytest.raises(ValueError, match="ffmpeg, gstreamer"):
-        create_jpeg_rtp_encoder(backend="auto")
+        create_rtp_encoder(backend="auto")
 
 
 def test_gstreamer_preflight_reports_the_missing_element():

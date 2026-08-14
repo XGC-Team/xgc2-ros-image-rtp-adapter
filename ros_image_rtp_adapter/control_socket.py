@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import os
 import socket
+import stat
 import threading
 from dataclasses import dataclass
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Optional, Tuple
 
 
 PROTOCOL_VERSION = 1
+_SOCKET_CREATION_LOCK = threading.Lock()
 
 
 @dataclass
@@ -63,6 +65,9 @@ class SourceControlServer:
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._server: Optional[socket.socket] = None
+        self._parent_fd: Optional[int] = None
+        self._socket_name = ""
+        self._socket_identity: Optional[Tuple[int, int]] = None
         # Capture sources are demand-driven.  Edge explicitly activates them
         # for a viewer, recording, or snapshot transaction.
         self._active = False
@@ -74,19 +79,65 @@ class SourceControlServer:
     def start(self) -> None:
         if self._thread is not None:
             return
-        parent = os.path.dirname(self._path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
+        if not os.path.isabs(self._path):
+            raise ValueError("control socket path must be absolute")
+        if len(os.fsencode(self._path)) > 107:
+            raise ValueError("control socket path exceeds the Linux Unix socket limit")
+        parent, socket_name = os.path.split(self._path)
+        if not socket_name or socket_name in {".", ".."}:
+            raise ValueError("control socket path must name one socket entry")
+        parent_fd = os.open(
+            parent,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+        )
         try:
-            os.unlink(self._path)
+            os.stat(socket_name, dir_fd=parent_fd, follow_symlinks=False)
         except FileNotFoundError:
             pass
-        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        server.bind(self._path)
-        os.chmod(self._path, 0o666)
-        server.listen(16)
-        server.settimeout(0.5)
+        else:
+            os.close(parent_fd)
+            raise FileExistsError("control socket path already exists: %s" % self._path)
+
+        server: Optional[socket.socket] = None
+        socket_identity: Optional[Tuple[int, int]] = None
+        try:
+            server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            # Bind through the open directory descriptor so a concurrent parent
+            # path replacement cannot redirect creation outside the inspected
+            # run-owned directory.
+            # Unix socket mode is selected at bind time. Serialize the brief
+            # process-wide umask change so this module never creates a
+            # world-readable control endpoint.
+            with _SOCKET_CREATION_LOCK:
+                previous_umask = os.umask(0o177)
+                try:
+                    server.bind("/proc/self/fd/%d/%s" % (parent_fd, socket_name))
+                finally:
+                    os.umask(previous_umask)
+            socket_stat = os.stat(
+                socket_name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+            socket_identity = (socket_stat.st_dev, socket_stat.st_ino)
+            if not stat.S_ISSOCK(socket_stat.st_mode):
+                raise RuntimeError("bound control endpoint is not a Unix socket")
+            if stat.S_IMODE(socket_stat.st_mode) != 0o600:
+                raise RuntimeError("control socket permissions are not private")
+            server.listen(16)
+            server.settimeout(0.5)
+        except Exception:
+            if server is not None:
+                server.close()
+            self._unlink_if_owned(parent_fd, socket_name, socket_identity)
+            os.close(parent_fd)
+            raise
+
+        self._stop.clear()
         self._server = server
+        self._parent_fd = parent_fd
+        self._socket_name = socket_name
+        self._socket_identity = socket_identity
         self._thread = threading.Thread(
             target=self._serve_loop,
             name="source-control",
@@ -105,10 +156,38 @@ class SourceControlServer:
             except OSError:
                 pass
             self._server = None
+        if self._parent_fd is not None:
+            self._unlink_if_owned(
+                self._parent_fd,
+                self._socket_name,
+                self._socket_identity,
+            )
+            os.close(self._parent_fd)
+            self._parent_fd = None
+        self._socket_name = ""
+        self._socket_identity = None
+
+    @staticmethod
+    def _unlink_if_owned(
+        parent_fd: int,
+        socket_name: str,
+        expected_identity: Optional[Tuple[int, int]],
+    ) -> None:
+        if not socket_name or expected_identity is None:
+            return
         try:
-            os.unlink(self._path)
+            current = os.stat(
+                socket_name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
         except FileNotFoundError:
-            pass
+            return
+        if not stat.S_ISSOCK(current.st_mode):
+            return
+        if (current.st_dev, current.st_ino) != expected_identity:
+            return
+        os.unlink(socket_name, dir_fd=parent_fd)
 
     def _serve_loop(self) -> None:
         assert self._server is not None

@@ -1,0 +1,20 @@
+{
+  "schema": "xgc2.integration-lock/v1",
+  "go": {
+    "linuxSha256": {
+      "amd64": "990e6b4bbba816dc3ee129eaeaf4b42f17c2800b88a2166c265ac1a200262282",
+      "arm64": "c958a1fe1b361391db163a485e21f5f228142d6f8b584f6bef89b26f66dc5b23"
+    },
+    "version": "1.26.2"
+  },
+  "mediaEdge": {
+    "repository": "https://github.com/lxk36/xgc2-media-edge.git",
+    "sourceSha": "900ea348e08ecbba0d010971af1d0647cad8c093",
+    "version": "0.6.0-1"
+  },
+  "rosImages": {
+    "humble-jammy": "docker.io/library/ros@sha256:7bea3d9aa2483d3ca34c8e30d921b79273b0913bd7dc64bebf51d082b5d107e4",
+    "jazzy-noble": "docker.io/library/ros@sha256:da725acf8b0f9f30c683e33ffbdcd6482d077af96d6fdc7688c5f4f280b7d923",
+    "noetic-focal": "docker.io/library/ros@sha256:72b8bc59035dc0a5b8e07aae28c16caa84192971d72d207c72ed734fb1d5e97d"
+  }
+}

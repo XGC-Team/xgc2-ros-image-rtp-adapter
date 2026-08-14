@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC1090 # ROS distro setup path is selected by the matrix.
 # End-to-end CI check: test JPEG publisher → ros_image_rtp_adapter → xgc-media-edge.
 # Fails closed if describe contract or Edge readiness is broken.
 set -euo pipefail
@@ -7,11 +8,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 ROS_DISTRO="${ROS_DISTRO:-jazzy}"
+EXPECTED_ADAPTER_PREFIX="${EXPECTED_ADAPTER_PREFIX:-/opt/ros/${ROS_DISTRO}}"
 MEDIA_EDGE_DIR="${MEDIA_EDGE_DIR:-}"
 MEDIA_EDGE_BINARY="${MEDIA_EDGE_BINARY:-}"
 SOURCE_ID="${SOURCE_ID:-ci_camera}"
 RTP_PORT="${RTP_PORT:-15004}"
-CONTROL_SOCKET="${CONTROL_SOCKET:-/tmp/xgc2-image-rtp-ci.sock}"
 EDGE_HTTP="${EDGE_HTTP:-127.0.0.1:18091}"
 IMAGE_TOPIC="${IMAGE_TOPIC:-/ci/image/compressed}"
 WIDTH="${WIDTH:-640}"
@@ -19,7 +20,15 @@ HEIGHT="${HEIGHT:-360}"
 FPS="${FPS:-10}"
 TIMEOUT_SEC="${TIMEOUT_SEC:-90}"
 
-WORK="$(mktemp -d /tmp/xgc2-image-rtp-ci.XXXXXX)"
+case "${ROS_DISTRO}" in
+  noetic|humble|jazzy) ;;
+  *) echo "unsupported ROS distro: ${ROS_DISTRO}" >&2; exit 1 ;;
+esac
+
+if [[ -n "${CONTROL_SOCKET+x}" ]]; then
+  echo "CONTROL_SOCKET is run-owned and cannot be overridden" >&2
+  exit 1
+fi
 cleanup() {
   set +e
   [[ -n "${PUB_PID:-}" ]] && kill "${PUB_PID}" 2>/dev/null
@@ -27,10 +36,25 @@ cleanup() {
   [[ -n "${EDGE_PID:-}" ]] && kill "${EDGE_PID}" 2>/dev/null
   [[ -n "${MASTER_PID:-}" ]] && kill "${MASTER_PID}" 2>/dev/null
   wait 2>/dev/null || true
-  rm -rf "${WORK}"
-  rm -f "${CONTROL_SOCKET}"
+  [[ -n "${WORK:-}" ]] && rm -rf -- "${WORK}"
 }
+WORK="$(mktemp -d /tmp/xgc2-image-rtp-ci.XXXXXX)"
 trap cleanup EXIT
+CONTROL_SOCKET="${WORK}/adapter-control.sock"
+for integer_contract in \
+  "RTP_PORT:${RTP_PORT}:1:65535" \
+  "WIDTH:${WIDTH}:1:16384" \
+  "HEIGHT:${HEIGHT}:1:16384" \
+  "FPS:${FPS}:1:240" \
+  "TIMEOUT_SEC:${TIMEOUT_SEC}:1:600"; do
+  IFS=: read -r integer_name integer_value integer_min integer_max \
+    <<<"${integer_contract}"
+  if [[ ! "${integer_value}" =~ ^[0-9]+$ ]] || \
+      (( 10#${integer_value} < integer_min || 10#${integer_value} > integer_max )); then
+    echo "${integer_name} must be an integer in [${integer_min}, ${integer_max}]" >&2
+    exit 1
+  fi
+done
 
 log() { printf '[integration] %s\n' "$*"; }
 
@@ -60,14 +84,36 @@ command -v python3 >/dev/null
 set +u
 # shellcheck disable=SC1091
 source "/opt/ros/${ROS_DISTRO}/setup.bash"
-if [[ -f "${REPO_ROOT}/install/setup.bash" ]]; then
-  # shellcheck disable=SC1091
-  source "${REPO_ROOT}/install/setup.bash"
-elif [[ -f "${WORKSPACE_INSTALL:-}/setup.bash" ]]; then
-  # shellcheck disable=SC1091
-  source "${WORKSPACE_INSTALL}/setup.bash"
-fi
 set -u
+
+case "${EXPECTED_ADAPTER_PREFIX}" in
+  /*) ;;
+  *) echo "EXPECTED_ADAPTER_PREFIX must be absolute" >&2; exit 1 ;;
+esac
+if [[ "${ROS_DISTRO}" == "noetic" ]]; then
+  actual_adapter_prefix="$(rospack find ros_image_rtp_adapter)"
+  expected_adapter_prefix="${EXPECTED_ADAPTER_PREFIX}/share/ros_image_rtp_adapter"
+else
+  actual_adapter_prefix="$(ros2 pkg prefix ros_image_rtp_adapter)"
+  expected_adapter_prefix="${EXPECTED_ADAPTER_PREFIX}"
+fi
+if [[ "${actual_adapter_prefix}" != "${expected_adapter_prefix}" ]]; then
+  echo "adapter resolved from ${actual_adapter_prefix}, expected ${expected_adapter_prefix}" >&2
+  exit 1
+fi
+EXPECTED_ADAPTER_PREFIX="${EXPECTED_ADAPTER_PREFIX}" python3 - <<'PY'
+import os
+from pathlib import Path
+import ros_image_rtp_adapter
+
+module_path = Path(ros_image_rtp_adapter.__file__).resolve()
+expected_prefix = Path(os.environ["EXPECTED_ADAPTER_PREFIX"]).resolve()
+if expected_prefix not in module_path.parents:
+    raise SystemExit(
+        "adapter Python module resolved from %s, expected beneath %s"
+        % (module_path, expected_prefix)
+    )
+PY
 
 if [[ -n "${MEDIA_EDGE_BINARY}" ]]; then
   log "using media-edge binary ${MEDIA_EDGE_BINARY}"
@@ -159,12 +205,17 @@ if ! python3 "${SCRIPT_DIR}/wait_describe.py" \
   exit 1
 fi
 
+SOURCES_CONFIG="${WORK}/media-edge-sources.json"
+python3 "${SCRIPT_DIR}/write_media_edge_source_roster.py" \
+  --output "${SOURCES_CONFIG}" \
+  --source-id "${SOURCE_ID}" \
+  --rtp-port "${RTP_PORT}" \
+  --control-socket "${CONTROL_SOCKET}"
+
 log "starting xgc-media-edge"
 "${WORK}/xgc-media-edge" \
   -control-address "${EDGE_HTTP}" \
-  -source-id "${SOURCE_ID}" \
-  -rtp-listen-address "127.0.0.1:${RTP_PORT}" \
-  -source-control-socket "${CONTROL_SOCKET}" \
+  -sources-config "${SOURCES_CONFIG}" \
   >"${WORK}/edge.log" 2>&1 &
 EDGE_PID=$!
 
@@ -193,16 +244,34 @@ if [[ "${healthy}" != "1" ]]; then
   exit 1
 fi
 
-# Edge accepted the source only if Start() succeeded — verify log line and player page.
+# Edge accepted the source only if Start() succeeded. Verify the embedded
+# player's structural contract and executable assets; visible copy belongs to
+# the React application and is not an integration API.
 if ! grep -q "xgc-media-edge ready" "${WORK}/edge.log"; then
   log "media-edge did not report ready"
   cat "${WORK}/edge.log"
   exit 1
 fi
-curl -fsS "http://${EDGE_HTTP}/" | grep -qi "webrtc\|video\|session" || {
-  log "player page missing expected content"
+curl -fsS "http://${EDGE_HTTP}/" >"${WORK}/player.html"
+if ! grep -Fq 'id="app" data-source-id=' "${WORK}/player.html" || \
+    ! grep -Fq 'href="/assets/player.css"' "${WORK}/player.html" || \
+    ! grep -Fq 'type="module" src="/assets/player.js"' "${WORK}/player.html"; then
+  log "player shell is missing its source mount or immutable assets"
   exit 1
-}
+fi
+curl -fsS "http://${EDGE_HTTP}/assets/player.js" >"${WORK}/player.js"
+curl -fsS "http://${EDGE_HTTP}/assets/player.css" >"${WORK}/player.css"
+if ! grep -Fq 'RTCPeerConnection' "${WORK}/player.js" || \
+    ! grep -Fq 'recvonly' "${WORK}/player.js" || \
+    ! grep -Fq 'xgc-app-shell' "${WORK}/player.js"; then
+  log "embedded player script is incomplete"
+  exit 1
+fi
+if ! grep -Fq '.xgc-topbar' "${WORK}/player.css" || \
+    ! grep -Fq '.media-player-page' "${WORK}/player.css"; then
+  log "embedded player stylesheet is incomplete"
+  exit 1
+fi
 
 # No viewer exists in this contract test, so Edge deliberately leaves the
 # source inactive.  The successful describe transaction plus live publisher
@@ -220,6 +289,6 @@ if ! kill -0 "${PUB_PID}" 2>/dev/null; then
   exit 1
 fi
 
-log "OK: publisher + describe contract + media-edge healthz + player page"
+log "OK: publisher + describe contract + media-edge healthz + embedded player assets"
 cat "${WORK}/healthz.json"
 exit 0

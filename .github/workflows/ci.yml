@@ -21,13 +21,13 @@ jobs:
   compliance:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 2
       - name: Compliance
         run: |
           set -euo pipefail
-          chmod +x .xgc2/scripts/*.sh scripts/*.sh scripts/*.py || true
+          chmod +x .xgc2/scripts/*.sh scripts/*.sh scripts/*.py
           git diff --check HEAD
           .xgc2/scripts/check_package_compliance.sh
 
@@ -69,7 +69,7 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Build deb + install-check + media-edge integration
         env:
@@ -78,14 +78,19 @@ jobs:
           EXPECTED_ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
-          chmod +x .xgc2/scripts/*.sh scripts/*.sh scripts/*.py || true
+          chmod +x .xgc2/scripts/*.sh scripts/*.sh scripts/*.py
           host_arch="$(dpkg --print-architecture)"
           test "${host_arch}" = "${EXPECTED_ARCH}"
+          dependency_set_digest="$(python3 .xgc2/scripts/read_integration_lock.py \
+            --lock .xgc2/integration-lock.json --field dependencySetDigest)"
+          echo "XGC2_CI_DEPENDENCY_SET_DIGEST=${dependency_set_digest}" >> "$GITHUB_ENV"
           .xgc2/scripts/build_debs_in_docker.sh \
             --ros-distro "${ROS_DISTRO}" \
             --ubuntu "${UBUNTU_CODENAME}" \
-            --work-dir "$RUNNER_TEMP/work-${ROS_DISTRO}-${EXPECTED_ARCH}" \
-            --output-dir "$GITHUB_WORKSPACE/debs"
+            --output-dir "$GITHUB_WORKSPACE/debs" \
+            --prepare-action ci \
+            --dependency-mode locked-source \
+            --dependency-set-digest "${dependency_set_digest}"
 
       - name: Create trusted build manifest
         run: |
@@ -101,10 +106,28 @@ jobs:
             --source-sha "$GITHUB_SHA" \
             --ci-run-id "$GITHUB_RUN_ID" \
             --ci-workflow "$GITHUB_WORKFLOW" \
-            --ci-workflow-ref "$GITHUB_WORKFLOW_REF"
+            --ci-workflow-ref "$GITHUB_WORKFLOW_REF" \
+            --prepare-action ci \
+            --dependency-mode locked-source \
+            --dependency-set-digest "$XGC2_CI_DEPENDENCY_SET_DIGEST" \
+            --dependency-evidence debs/xgc2-dependency-evidence.json
+          python3 .xgc2/scripts/xgc2_artifact_manifest.py verify-build \
+            --artifact-dir . \
+            --deb-output-dir .ci/verified-debs \
+            --manifest-output-dir .ci/verified-manifests \
+            --product xgc2-ros-image-rtp-adapter \
+            --product-version "$product_version" \
+            --distribution "${{ matrix.distribution }}" \
+            --architecture "${{ matrix.arch }}" \
+            --source-sha "$GITHUB_SHA" \
+            --ci-run-id "$GITHUB_RUN_ID" \
+            --prepare-action ci \
+            --dependency-mode locked-source \
+            --dependency-set-digest "$XGC2_CI_DEPENDENCY_SET_DIGEST" \
+            --dependency-evidence debs/xgc2-dependency-evidence.json
 
       - name: Upload deb artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: xgc2-ros-image-rtp-adapter-${{ matrix.distribution }}-${{ matrix.arch }}
           path: |
