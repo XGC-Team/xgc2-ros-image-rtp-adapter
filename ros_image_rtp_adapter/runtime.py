@@ -6,7 +6,7 @@ from collections import deque
 from dataclasses import dataclass
 import threading
 import time
-from typing import Callable, Deque, Dict, Optional
+from typing import Callable, Deque, Dict, Optional, Tuple
 
 from ros_image_rtp_adapter.control_socket import SourceControlServer, SourceDescription
 from ros_image_rtp_adapter.encoder import (
@@ -80,7 +80,7 @@ class ImageRtpAdapterRuntime:
             description,
             on_set_active=self.set_active,
             on_request_keyframe=self._encoder.request_keyframe,
-            on_snapshot=self.snapshot_jpeg,
+            on_snapshot=self.snapshot_parts,
         )
 
     @property
@@ -210,19 +210,38 @@ class ImageRtpAdapterRuntime:
         return True
 
     def snapshot_jpeg(self) -> Optional[bytes]:
+        jpeg, _rgb = self.snapshot_parts() or (None, None)
+        return jpeg
+
+    def snapshot_parts(self) -> Optional[Tuple[bytes, bytes]]:
         with self._lock:
             frame = self._latest
         if frame is None:
             return None
+        jpeg: Optional[bytes] = None
+        rgb = b""
         if frame.jpeg_snapshot is not None:
-            return frame.jpeg_snapshot
-        if frame.raw_snapshot is None:
+            jpeg = frame.jpeg_snapshot
+        elif frame.raw_snapshot is not None:
+            try:
+                jpeg = frame.raw_snapshot.to_jpeg()
+            except Exception as exc:
+                self._log_error(f"raw snapshot JPEG conversion failed: {exc}")
+        if frame.raw_snapshot is not None:
+            try:
+                rgb = frame.raw_snapshot.to_rgb()
+            except Exception as exc:
+                self._log_error(f"raw snapshot RGB conversion failed: {exc}")
+        if jpeg and not rgb:
+            try:
+                from io import BytesIO
+                from PIL import Image
+                rgb = Image.open(BytesIO(jpeg)).convert("RGB").tobytes()
+            except Exception as exc:
+                self._log_error(f"JPEG snapshot RGB conversion failed: {exc}")
+        if not jpeg:
             return None
-        try:
-            return frame.raw_snapshot.to_jpeg()
-        except Exception as exc:
-            self._log_error(f"raw snapshot JPEG conversion failed: {exc}")
-            return None
+        return jpeg, rgb
 
     def status(self) -> Dict[str, object]:
         with self._lock:

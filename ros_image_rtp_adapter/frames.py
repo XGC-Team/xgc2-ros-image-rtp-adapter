@@ -51,6 +51,26 @@ class RawFrame:
         image.save(output, format="JPEG", quality=quality)
         return output.getvalue()
 
+    def to_rgb(self) -> bytes:
+        try:
+            from PIL import Image
+        except ImportError as exc:  # pragma: no cover - package dependency gate
+            raise RuntimeError("raw snapshots require python3-pil") from exc
+
+        mode, decoder, _ = _RAW_LAYOUTS[self.encoding]
+        image = Image.frombytes(
+            mode,
+            (self.width, self.height),
+            self.data,
+            "raw",
+            decoder,
+            0,
+            1,
+        )
+        if image.mode != "RGB":
+            image = image.convert("RGB")
+        return image.tobytes()
+
 
 def normalize_raw_encoding(value: str) -> str:
     encoding = value.strip().lower()

@@ -7,6 +7,7 @@ import os
 import socket
 import stat
 import threading
+import time
 from dataclasses import dataclass
 from typing import Callable, Dict, Optional, Tuple
 
@@ -258,19 +259,31 @@ class SourceControlServer:
             return
         if operation == "snapshot":
             jpeg = b""
+            rgb = b""
             if self._on_snapshot is not None:
-                jpeg = self._on_snapshot() or b""
+                payload = self._on_snapshot()
+                if isinstance(payload, tuple) and len(payload) == 2:
+                    jpeg = payload[0] or b""
+                    rgb = payload[1] or b""
+                else:
+                    jpeg = payload or b""
+            width = int(self._description.width)
+            height = int(self._description.height)
             header = {
                 "ok": True,
                 "snapshotId": str(request.get("snapshotId", "")),
                 "jpegBytes": len(jpeg),
-                "rgbBytes": 0,
-                "width": self._description.width,
-                "height": self._description.height,
+                "rgbBytes": len(rgb),
+                "width": width,
+                "height": height,
                 "frameId": self._description.frame_id,
+                "pixelFormat": "rgb8",
+                "timestampNanoseconds": time.time_ns(),
                 "timestampClockDomain": "system_realtime",
+                "cameraMatrix": [float(width), 0.0, width / 2.0, 0.0, float(width), height / 2.0, 0.0, 0.0, 1.0],
+                "distortion": [0.0, 0.0, 0.0, 0.0, 0.0],
             }
-            conn.sendall(json.dumps(header, separators=(",", ":")).encode("utf-8") + b"\n" + jpeg)
+            conn.sendall(json.dumps(header, separators=(",", ":")).encode("utf-8") + b"\n" + jpeg + rgb)
             return
         self._write_json(conn, {"ok": False, "error": f"unsupported operation: {operation}"})
 
