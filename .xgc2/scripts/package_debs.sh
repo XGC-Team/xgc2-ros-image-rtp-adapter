@@ -307,9 +307,9 @@ mkdir -p "${OUTPUT_DIR}" "${PKG_ROOT}/DEBIAN" \
   "${PKG_ROOT}/usr/share/doc/${PACKAGE}"
 
 if [[ "${ROS_DISTRO}" == "noetic" ]]; then
-  DEPENDS="ros-noetic-rospy, ros-noetic-sensor-msgs, ffmpeg, libavcodec-extra, python3-numpy, python3-pil, gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly"
+  DEPENDS="ros-noetic-rospy, ros-noetic-sensor-msgs, ffmpeg, python3-numpy, python3-pil, gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly"
 else
-  DEPENDS="ros-${ROS_DISTRO}-rclpy, ros-${ROS_DISTRO}-sensor-msgs, ros-${ROS_DISTRO}-std-msgs, ros-${ROS_DISTRO}-launch, ros-${ROS_DISTRO}-launch-ros, ffmpeg, libavcodec-extra, python3-numpy, python3-pil, gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly"
+  DEPENDS="ros-${ROS_DISTRO}-rclpy, ros-${ROS_DISTRO}-sensor-msgs, ros-${ROS_DISTRO}-std-msgs, ros-${ROS_DISTRO}-launch, ros-${ROS_DISTRO}-launch-ros, ffmpeg, python3-numpy, python3-pil, gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly"
 fi
 
 cat >"${PKG_ROOT}/DEBIAN/control" <<EOF

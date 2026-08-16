@@ -108,7 +108,6 @@ for owned_path in \
   grep -Fxq "  - ${owned_path}" .xgc2/product.yml
 done
 for runtime_dependency in \
-  libavcodec-extra \
   ros-noetic-rospy ros-noetic-sensor-msgs \
   ros-humble-rclpy ros-humble-sensor-msgs ros-humble-std-msgs \
   ros-humble-launch ros-humble-launch-ros \
@@ -116,9 +115,8 @@ for runtime_dependency in \
   ros-jazzy-launch ros-jazzy-launch-ros; do
   grep -Fxq "  - ${runtime_dependency}" .xgc2/product.yml
 done
-grep -Fq 'libavcodec-extra' .xgc2/scripts/package_debs.sh
 for common_ros_dependency in \
-  python3-numpy python3-pil ffmpeg libavcodec-extra \
+  python3-numpy python3-pil ffmpeg \
   gstreamer1.0-tools gstreamer1.0-plugins-base \
   gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
   gstreamer1.0-plugins-ugly; do

@@ -18,7 +18,6 @@
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-pil</exec_depend>
   <exec_depend>ffmpeg</exec_depend>
-  <exec_depend>libavcodec-extra</exec_depend>
   <exec_depend>gstreamer1.0-tools</exec_depend>
   <exec_depend>gstreamer1.0-plugins-base</exec_depend>
   <exec_depend>gstreamer1.0-plugins-good</exec_depend>
