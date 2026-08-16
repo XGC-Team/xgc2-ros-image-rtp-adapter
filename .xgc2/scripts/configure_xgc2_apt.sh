@@ -31,8 +31,8 @@ case "${distribution}" in
     ;;
 esac
 
-apt-get update
-apt-get install -y --no-install-recommends ca-certificates curl gnupg
+command -v curl >/dev/null
+command -v gpg >/dev/null
 key_file="$(mktemp /tmp/xgc2-archive-keyring.XXXXXX)"
 trap 'rm -f -- "${key_file}"' EXIT
 curl -fsSL "${archive_key_url}" -o "${key_file}"

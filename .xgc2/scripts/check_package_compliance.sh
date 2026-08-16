@@ -8,6 +8,7 @@ export PYTHONDONTWRITEBYTECODE=1
 test -f package.xml
 test -f setup.py
 test -f .xgc2/product.yml
+test -f .github/workflows/ci-bootstrap-gate.yml
 test -f ros_image_rtp_adapter/node.py
 test -f ros_image_rtp_adapter/ros1_node.py
 test -f ros_image_rtp_adapter/runtime.py
@@ -40,11 +41,14 @@ for release_contract_marker in \
   '--apt-overlay-url "${APT_OVERLAY_URL}"'; do
   grep -Fq -- "${release_contract_marker}" .github/workflows/release.yml
 done
-if grep -RInE 'uses:[[:space:]]+[^#[:space:]]+@(v[0-9]+|main|master|latest)([[:space:]#]|$)' \
+if grep -RInE --exclude=ci-bootstrap-gate.yml \
+    'uses:[[:space:]]+[^#[:space:]]+@(v[0-9]+|main|master|latest)([[:space:]#]|$)' \
     .github/workflows; then
   echo "GitHub Actions must be pinned by a full commit SHA" >&2
   exit 1
 fi
+grep -Fq 'XGC-Team/xgc2-images/.github/workflows/reusable-check-ci-bootstrap.yml@master' \
+  .github/workflows/ci-bootstrap-gate.yml
 python3 - .github/workflows/ci.yml .github/workflows/release.yml <<'PY'
 from pathlib import Path
 import re
@@ -157,13 +161,6 @@ python3 -m py_compile scripts/write_media_edge_source_roster.py
 python3 -m py_compile .xgc2/scripts/read_integration_lock.py
 python3 -m py_compile .xgc2/scripts/xgc2_artifact_manifest.py
 python3 .xgc2/scripts/read_integration_lock.py --lock .xgc2/integration-lock.json
-test "$(python3 .xgc2/scripts/read_integration_lock.py \
-  --lock .xgc2/integration-lock.json --field goVersion)" = "1.26.2"
-for architecture in amd64 arm64; do
-  test "$(python3 .xgc2/scripts/read_integration_lock.py \
-    --lock .xgc2/integration-lock.json --field goSha256 \
-    --architecture "${architecture}" | wc -c)" = "65"
-done
 python3 -m py_compile ros1/scripts/image_rtp_adapter ros1/scripts/publish_test_jpeg
 bash -n scripts/integration_media_edge.sh scripts/lab_video_preview.sh
 bash -n \
@@ -230,7 +227,15 @@ grep -Fq 'apt-get --print-uris download "xgc2-media-edge=${media_edge_candidate}
 grep -Fq '"xgc2-media-edge=${media_edge_candidate}"' .xgc2/scripts/build_debs_in_docker.sh
 grep -Fq '"schema": "xgc2.dependency-evidence.v1"' .xgc2/scripts/build_debs_in_docker.sh
 grep -Fq 'test -x /usr/lib/xgc2-media-edge/mediamtx' .xgc2/scripts/build_debs_in_docker.sh
-grep -Fq 'sha256sum -c -' .xgc2/scripts/build_debs_in_docker.sh
+if grep -Eq 'apt-get install.*(build-essential|cmake|python3-pip)|go\.dev/dl/' \
+    .xgc2/scripts/build_debs_in_docker.sh; then
+  echo "build container must consume the XGC2 image toolchain without bootstrapping" >&2
+  exit 1
+fi
+if grep -Fq 'apt-get install' .xgc2/scripts/configure_xgc2_apt.sh; then
+  echo "staging APT setup must use image-provided curl and gpg" >&2
+  exit 1
+fi
 grep -Fq 'env -i' .xgc2/scripts/build_debs_in_docker.sh
 grep -Fq 'SOURCE_DATE_EPOCH' .xgc2/scripts/package_debs.sh
 grep -Fq 'Recommends: xgc2-media-edge' .xgc2/scripts/package_debs.sh
@@ -273,7 +278,7 @@ if start < 0 or end < 0 or "exit 1" not in source[start:end]:
 PY
 
 # CLI resolution is independent of option order and rejects invalid pairs or
-# floating image overrides without starting Docker.
+# non-approved image overrides without starting Docker.
 dependency_set_digest="$(python3 .xgc2/scripts/read_integration_lock.py \
   --lock .xgc2/integration-lock.json --field dependencySetDigest)"
 contract_args=(
@@ -292,7 +297,7 @@ config_b="$(env DOCKER_IMAGE= ROS_DISTRO=jazzy UBUNTU_CODENAME=noble \
 test "${config_a}" = "${config_b}"
 grep -Fq 'ros_distro=humble' <<<"${config_a}"
 grep -Fq 'ubuntu=jammy' <<<"${config_a}"
-grep -Eq '^image=docker\.io/library/ros@sha256:[0-9a-f]{64}$' <<<"${config_a}"
+grep -Fxq 'image=ghcr.io/xgc-team/xgc2-images/xgc2-build-jammy-ros-humble:1.0.0' <<<"${config_a}"
 if env DOCKER_IMAGE= ROS_DISTRO=jazzy UBUNTU_CODENAME=noble \
     .xgc2/scripts/build_debs_in_docker.sh \
     "${contract_args[@]}" \
@@ -304,7 +309,7 @@ if env DOCKER_IMAGE= ROS_DISTRO=jazzy UBUNTU_CODENAME=noble \
     .xgc2/scripts/build_debs_in_docker.sh \
     "${contract_args[@]}" \
     --image ros:jazzy-ros-base-noble --print-config >/dev/null 2>&1; then
-  echo "build CLI accepted a floating Docker image" >&2
+  echo "build CLI accepted a non-approved Docker image" >&2
   exit 1
 fi
 if env DOCKER_IMAGE= ROS_DISTRO=jazzy UBUNTU_CODENAME=noble \

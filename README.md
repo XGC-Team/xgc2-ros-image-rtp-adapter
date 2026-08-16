@@ -238,8 +238,9 @@ runs the shared unit suite, proves JPEG and raw GStreamer RTP emission, and
 runs publisher -> adapter -> Media Edge contract integration from the installed
 `/opt/ros/<distro>` package in a workspace-free environment. Push CI uses the
 hash-pinned Media Edge source; release-train compatibility jobs install the
-signed staging APT candidate and never fall back to that source lock. ROS base
-images and the Go toolchain archive are digest/hash pinned. Package
+signed staging APT candidate and never fall back to that source lock. Builds
+use the versioned XGC2 ROS build images and their preinstalled Go toolchain;
+product CI does not install distro packages or download a toolchain. Package
 staging uses an exact file manifest, rejects caches or foreign files, and builds
 the DEB twice under one `SOURCE_DATE_EPOCH` to prove deterministic output.
 

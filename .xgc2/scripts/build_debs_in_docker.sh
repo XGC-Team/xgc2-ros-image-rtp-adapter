@@ -87,20 +87,18 @@ if [[ "${DEPENDENCY_MODE}" == "locked-source" && -n "${APT_OVERLAY_URL}" ]]; the
 fi
 
 python3 "${LOCK_READER}" --lock "${INTEGRATION_LOCK}"
+locked_docker_image="$(python3 "${LOCK_READER}" --lock "${INTEGRATION_LOCK}" \
+  --field rosImage --ros-distro "${ROS_DISTRO}" --ubuntu "${UBUNTU_CODENAME}")"
 if [[ -z "${DOCKER_IMAGE}" ]]; then
-  DOCKER_IMAGE="$(python3 "${LOCK_READER}" --lock "${INTEGRATION_LOCK}" \
-    --field rosImage --ros-distro "${ROS_DISTRO}" --ubuntu "${UBUNTU_CODENAME}")"
-elif [[ ! "${DOCKER_IMAGE}" =~ @sha256:[0-9a-f]{64}$ ]]; then
-  echo "explicit Docker image must be pinned by sha256 digest" >&2
+  DOCKER_IMAGE="${locked_docker_image}"
+elif [[ "${DOCKER_IMAGE}" != "${locked_docker_image}" ]]; then
+  echo "explicit Docker image must match the approved XGC2 build image for ${ROS_DISTRO}/${UBUNTU_CODENAME}" >&2
   exit 1
 fi
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/debs}"
 MEDIA_EDGE_URL="$(python3 "${LOCK_READER}" --lock "${INTEGRATION_LOCK}" --field repository)"
 MEDIA_EDGE_SHA="$(python3 "${LOCK_READER}" --lock "${INTEGRATION_LOCK}" --field sourceSha)"
 MEDIA_EDGE_VERSION="$(python3 "${LOCK_READER}" --lock "${INTEGRATION_LOCK}" --field version)"
-GO_VERSION="$(python3 "${LOCK_READER}" --lock "${INTEGRATION_LOCK}" --field goVersion)"
-GO_SHA256_AMD64="$(python3 "${LOCK_READER}" --lock "${INTEGRATION_LOCK}" --field goSha256 --architecture amd64)"
-GO_SHA256_ARM64="$(python3 "${LOCK_READER}" --lock "${INTEGRATION_LOCK}" --field goSha256 --architecture arm64)"
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "${REPO_ROOT}" log -1 --format=%ct)}"
 if [[ ! "${SOURCE_DATE_EPOCH}" =~ ^[0-9]+$ ]]; then
   echo "SOURCE_DATE_EPOCH must be a non-negative integer" >&2
@@ -144,9 +142,6 @@ docker run --rm \
   -e DEPENDENCY_MODE="${DEPENDENCY_MODE}" \
   -e APT_OVERLAY_URL="${APT_OVERLAY_URL}" \
   -e DEPENDENCY_SET_DIGEST="${DEPENDENCY_SET_DIGEST}" \
-  -e GO_SHA256_AMD64="${GO_SHA256_AMD64}" \
-  -e GO_SHA256_ARM64="${GO_SHA256_ARM64}" \
-  -e GO_VERSION="${GO_VERSION}" \
   -e RUN_INTEGRATION="${RUN_INTEGRATION}" \
   -e ROS_DISTRO="${ROS_DISTRO}" \
   -e UBUNTU_CODENAME="${UBUNTU_CODENAME}" \
@@ -175,40 +170,14 @@ docker run --rm \
     if [[ "${DEPENDENCY_MODE}" == "staging-apt" ]]; then
       /bin/bash /workspace/repo/.xgc2/scripts/configure_xgc2_apt.sh \
         "${APT_OVERLAY_URL}" "${UBUNTU_CODENAME}"
-    else
-      apt-get update
-    fi
-    apt-get install -y --no-install-recommends \
-      build-essential cmake dpkg-dev fakeroot file git rsync \
-      python3 python3-pip python3-pytest python3-numpy python3-pil \
-      ffmpeg curl ca-certificates \
-      gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
-      gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly
-    if [[ "${ROS_DISTRO}" == "noetic" ]]; then
-      apt-get install -y --no-install-recommends \
-        ros-noetic-catkin ros-noetic-rospy ros-noetic-sensor-msgs \
-        ros-noetic-roslaunch ros-noetic-rosbash ros-noetic-rospack
-    else
-      apt-get install -y --no-install-recommends \
-        python3-colcon-common-extensions \
-        "ros-${ROS_DISTRO}-rclpy" "ros-${ROS_DISTRO}-sensor-msgs" \
-        "ros-${ROS_DISTRO}-std-msgs" "ros-${ROS_DISTRO}-launch" \
-        "ros-${ROS_DISTRO}-launch-ros" "ros-${ROS_DISTRO}-ros2pkg" \
-        "ros-${ROS_DISTRO}-ament-cmake"
     fi
 
-    # media-edge declares its exact toolchain floor in go.mod.
-    arch="$(dpkg --print-architecture)"
-    case "${arch}" in
-      amd64) go_arch=amd64; go_sha256="${GO_SHA256_AMD64}" ;;
-      arm64) go_arch=arm64; go_sha256="${GO_SHA256_ARM64}" ;;
-      *) echo "unsupported Go architecture: ${arch}" >&2; exit 1 ;;
-    esac
-    curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${go_arch}.tar.gz" -o /tmp/go.tgz
-    printf "%s  %s\n" "${go_sha256}" /tmp/go.tgz | sha256sum -c -
-    rm -rf /usr/local/go
-    tar -C /usr/local -xzf /tmp/go.tgz
-    export PATH="/usr/local/go/bin:${PATH:-/usr/bin}"
+    # Compile dependencies and toolchains are owned by the approved XGC2 image.
+    for command in cmake dpkg-deb fakeroot ffmpeg git go gst-launch-1.0 \
+      python3 rsync; do
+      command -v "${command}" >/dev/null
+    done
+    python3 -c "import numpy, PIL, pytest"
     go version
 
     rm -rf /workspace/work/build /workspace/work/install /workspace/work/log \
