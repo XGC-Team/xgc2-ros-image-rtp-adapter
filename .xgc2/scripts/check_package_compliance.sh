@@ -37,8 +37,7 @@ for release_contract_marker in \
   '--prepare-action "${PREPARE_ACTION}"' \
   '--dependency-mode "${dependency_mode}"' \
   '--dependency-set-digest "${DEPENDENCY_SET_DIGEST}"' \
-  '--apt-overlay-url "${APT_OVERLAY_URL}"' \
-  '--dependency-evidence debs/xgc2-dependency-evidence.json'; do
+  '--apt-overlay-url "${APT_OVERLAY_URL}"'; do
   grep -Fq -- "${release_contract_marker}" .github/workflows/release.yml
 done
 if grep -RInE 'uses:[[:space:]]+[^#[:space:]]+@(v[0-9]+|main|master|latest)([[:space:]#]|$)' \
@@ -243,15 +242,13 @@ grep -Fq '/workspace/work/repro/install-root' .xgc2/scripts/build_debs_in_docker
 grep -Fq -- '--mount type=volume,destination=/workspace/work,volume-nocopy' \
   .xgc2/scripts/build_debs_in_docker.sh
 for contract_marker in \
-  'xgc2.build-artifact.v2' \
-  'prepareAction' \
-  'dependencySetDigest' \
-  'dependencyMode' \
-  'dependencies'; do
+  'xgc2.build-artifact.v1' \
+  '"created_at": utc_now()'; do
   grep -Fq "${contract_marker}" .xgc2/scripts/xgc2_artifact_manifest.py
 done
-if grep -Fq 'xgc2.build-artifact.v1' .xgc2/scripts/xgc2_artifact_manifest.py; then
-  echo "build artifact v1 fallback was reintroduced" >&2
+if grep -Eq 'prepareAction|dependencySetDigest|dependencyMode|"dependencies"' \
+    .xgc2/scripts/xgc2_artifact_manifest.py; then
+  echo "dependency evidence must stay out of the v1 build manifest" >&2
   exit 1
 fi
 if grep -Eq -- '--work-dir|WORK_DIR' .xgc2/scripts/build_debs_in_docker.sh \

@@ -167,7 +167,6 @@ jobs:
             dependency_mode=staging-apt
             dependency_args+=(--apt-overlay-url "${APT_OVERLAY_URL}")
           fi
-          echo "XGC2_RELEASE_DEPENDENCY_MODE=${dependency_mode}" >> "$GITHUB_ENV"
           .xgc2/scripts/build_debs_in_docker.sh \
             --ros-distro "${{ matrix.ros_distro }}" \
             --ubuntu "${{ matrix.ubuntu }}" \
@@ -190,11 +189,7 @@ jobs:
             --source-sha "${{ inputs.expected_source_sha }}" \
             --ci-run-id "$GITHUB_RUN_ID" \
             --ci-workflow "$GITHUB_WORKFLOW" \
-            --ci-workflow-ref "$GITHUB_WORKFLOW_REF" \
-            --prepare-action "${{ inputs.prepare_action }}" \
-            --dependency-mode "$XGC2_RELEASE_DEPENDENCY_MODE" \
-            --dependency-set-digest "${{ inputs.dependency_set_digest }}" \
-            --dependency-evidence debs/xgc2-dependency-evidence.json
+            --ci-workflow-ref "$GITHUB_WORKFLOW_REF"
           python3 .xgc2/scripts/xgc2_artifact_manifest.py verify-build \
             --artifact-dir . \
             --deb-output-dir .ci/verified-debs \
@@ -204,11 +199,7 @@ jobs:
             --distribution "${{ matrix.distribution }}" \
             --architecture "${{ matrix.arch }}" \
             --source-sha "${{ inputs.expected_source_sha }}" \
-            --ci-run-id "$GITHUB_RUN_ID" \
-            --prepare-action "${{ inputs.prepare_action }}" \
-            --dependency-mode "$XGC2_RELEASE_DEPENDENCY_MODE" \
-            --dependency-set-digest "${{ inputs.dependency_set_digest }}" \
-            --dependency-evidence debs/xgc2-dependency-evidence.json
+            --ci-run-id "$GITHUB_RUN_ID"
 
       - name: Upload trusted deb artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

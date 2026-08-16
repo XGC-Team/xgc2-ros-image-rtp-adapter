@@ -83,7 +83,6 @@ jobs:
           test "${host_arch}" = "${EXPECTED_ARCH}"
           dependency_set_digest="$(python3 .xgc2/scripts/read_integration_lock.py \
             --lock .xgc2/integration-lock.json --field dependencySetDigest)"
-          echo "XGC2_CI_DEPENDENCY_SET_DIGEST=${dependency_set_digest}" >> "$GITHUB_ENV"
           .xgc2/scripts/build_debs_in_docker.sh \
             --ros-distro "${ROS_DISTRO}" \
             --ubuntu "${UBUNTU_CODENAME}" \
@@ -106,11 +105,7 @@ jobs:
             --source-sha "$GITHUB_SHA" \
             --ci-run-id "$GITHUB_RUN_ID" \
             --ci-workflow "$GITHUB_WORKFLOW" \
-            --ci-workflow-ref "$GITHUB_WORKFLOW_REF" \
-            --prepare-action ci \
-            --dependency-mode locked-source \
-            --dependency-set-digest "$XGC2_CI_DEPENDENCY_SET_DIGEST" \
-            --dependency-evidence debs/xgc2-dependency-evidence.json
+            --ci-workflow-ref "$GITHUB_WORKFLOW_REF"
           python3 .xgc2/scripts/xgc2_artifact_manifest.py verify-build \
             --artifact-dir . \
             --deb-output-dir .ci/verified-debs \
@@ -120,11 +115,7 @@ jobs:
             --distribution "${{ matrix.distribution }}" \
             --architecture "${{ matrix.arch }}" \
             --source-sha "$GITHUB_SHA" \
-            --ci-run-id "$GITHUB_RUN_ID" \
-            --prepare-action ci \
-            --dependency-mode locked-source \
-            --dependency-set-digest "$XGC2_CI_DEPENDENCY_SET_DIGEST" \
-            --dependency-evidence debs/xgc2-dependency-evidence.json
+            --ci-run-id "$GITHUB_RUN_ID"
 
       - name: Upload deb artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
