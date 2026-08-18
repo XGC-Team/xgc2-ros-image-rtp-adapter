@@ -22,7 +22,7 @@ SOURCE_SHA = "a" * 40
 def fake_deb_metadata(path: Path) -> dict[str, object]:
     return {
         "package": "ros-jazzy-xgc2-ros-image-rtp-adapter",
-        "version": "0.4.0",
+        "version": "0.4.1",
         "architecture": "amd64",
         "filename": path.name,
         "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
@@ -35,7 +35,7 @@ def build_args(root: Path) -> SimpleNamespace:
         deb_dir=str(root / "debs"),
         output_dir=str(root / "manifests"),
         product="xgc2-ros-image-rtp-adapter",
-        product_version="0.4.0",
+        product_version="0.4.1",
         distribution="noble",
         architecture="amd64",
         source_sha=SOURCE_SHA,
@@ -51,7 +51,7 @@ def verify_args(root: Path) -> SimpleNamespace:
         deb_output_dir=str(root / "verified-debs"),
         manifest_output_dir=str(root / "verified-manifests"),
         product="xgc2-ros-image-rtp-adapter",
-        product_version="0.4.0",
+        product_version="0.4.1",
         distribution="noble",
         architecture="amd64",
         source_sha=SOURCE_SHA,
