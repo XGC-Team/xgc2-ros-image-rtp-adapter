@@ -234,6 +234,13 @@ if grep -Fq 'apt-get install' .xgc2/scripts/configure_xgc2_apt.sh; then
   echo "staging APT setup must use image-provided curl and gpg" >&2
   exit 1
 fi
+grep -Fq '/etc/apt/sources.list.d/xgc2.list' .xgc2/scripts/configure_xgc2_apt.sh
+grep -Fq '00-xgc2-release-train.list' .xgc2/scripts/configure_xgc2_apt.sh
+grep -Fq 'https://xgc2.apt.xiaokang.ink' .xgc2/scripts/configure_xgc2_apt.sh
+if grep -Fq 'staging APT has no xgc2-media-edge candidate' .xgc2/scripts/build_debs_in_docker.sh; then
+  echo "media-edge install-check must accept a production candidate when overlay skips identical packages" >&2
+  exit 1
+fi
 grep -Fq 'env -i' .xgc2/scripts/build_debs_in_docker.sh
 grep -Fq 'SOURCE_DATE_EPOCH' .xgc2/scripts/package_debs.sh
 grep -Fq 'Recommends: xgc2-media-edge' .xgc2/scripts/package_debs.sh

@@ -12,16 +12,18 @@ validate_https_url() {
 }
 
 if [[ $# -ne 2 ]]; then
-  echo "usage: $0 <https-apt-base-url> <focal|jammy|noble>" >&2
+  echo "usage: $0 <https-apt-overlay-url> <focal|jammy|noble>" >&2
   exit 2
 fi
 
-apt_base_url="${1%/}"
+overlay_url="${1%/}"
 distribution="$2"
+production_url="https://xgc2.apt.xiaokang.ink"
 archive_key_url="https://xgc2.apt.xiaokang.ink/xgc2-archive-keyring.gpg"
 archive_key_fingerprint="2A8E11B36F56D307ADF626D85E5FDC30979EA43F"
 
-validate_https_url "XGC2 APT base URL" "${apt_base_url}"
+validate_https_url "XGC2 APT overlay URL" "${overlay_url}"
+validate_https_url "XGC2 APT production URL" "${production_url}"
 validate_https_url "XGC2 APT archive key URL" "${archive_key_url}"
 case "${distribution}" in
   focal|jammy|noble) ;;
@@ -47,7 +49,10 @@ fi
 
 install -d -m 0755 /etc/apt/keyrings
 install -m 0644 "${key_file}" /etc/apt/keyrings/xgc2-archive-keyring.gpg
-cat >/etc/apt/sources.list.d/xgc2-release-train.list <<EOF
-deb [signed-by=/etc/apt/keyrings/xgc2-archive-keyring.gpg] ${apt_base_url} ${distribution} main
+cat >/etc/apt/sources.list.d/xgc2.list <<EOF
+deb [signed-by=/etc/apt/keyrings/xgc2-archive-keyring.gpg] ${production_url} ${distribution} main
+EOF
+cat >/etc/apt/sources.list.d/00-xgc2-release-train.list <<EOF
+deb [signed-by=/etc/apt/keyrings/xgc2-archive-keyring.gpg] ${overlay_url} ${distribution} main
 EOF
 apt-get update

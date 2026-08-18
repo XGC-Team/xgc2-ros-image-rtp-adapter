@@ -303,11 +303,7 @@ docker run --rm \
           awk "/Candidate:/ {print \$2; exit}" <<<"${media_edge_policy}"
         )"
         if [[ -z "${media_edge_candidate}" || "${media_edge_candidate}" == "(none)" ]]; then
-          echo "staging APT has no xgc2-media-edge candidate" >&2
-          exit 1
-        fi
-        if ! grep -Fq "${APT_OVERLAY_URL}" <<<"${media_edge_policy}"; then
-          echo "xgc2-media-edge policy does not reference the requested staging APT" >&2
+          echo "APT has no xgc2-media-edge candidate" >&2
           exit 1
         fi
         mapfile -t media_edge_uris < <(
@@ -319,15 +315,15 @@ docker run --rm \
           exit 1
         fi
         case "${media_edge_uris[0]}" in
-          "${APT_OVERLAY_URL}"/*) ;;
+          "${APT_OVERLAY_URL}"/*|https://xgc2.apt.xiaokang.ink/*) ;;
           *)
-            echo "xgc2-media-edge candidate did not resolve from ${APT_OVERLAY_URL}" >&2
+            echo "xgc2-media-edge candidate did not resolve from overlay or production APT" >&2
             exit 1
             ;;
         esac
         apt-get install -y --no-install-recommends \
           "xgc2-media-edge=${media_edge_candidate}"
-        media_edge_source="${APT_OVERLAY_URL}"
+        media_edge_source="${media_edge_uris[0]}"
       else
         echo "installing exact media-edge for integration (sha=${MEDIA_EDGE_SHA})"
         rm -rf /workspace/work/media-edge
