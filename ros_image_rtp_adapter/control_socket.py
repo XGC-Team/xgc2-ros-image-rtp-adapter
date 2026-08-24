@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import socket
@@ -92,12 +93,10 @@ class SourceControlServer:
             os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
         )
         try:
-            os.stat(socket_name, dir_fd=parent_fd, follow_symlinks=False)
-        except FileNotFoundError:
-            pass
-        else:
+            self._recover_stale_socket(parent_fd, socket_name)
+        except Exception:
             os.close(parent_fd)
-            raise FileExistsError("control socket path already exists: %s" % self._path)
+            raise
 
         server: Optional[socket.socket] = None
         socket_identity: Optional[Tuple[int, int]] = None
@@ -145,6 +144,44 @@ class SourceControlServer:
             daemon=True,
         )
         self._thread.start()
+
+    def _recover_stale_socket(self, parent_fd: int, socket_name: str) -> None:
+        try:
+            existing = os.stat(
+                socket_name,
+                dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return
+
+        if not stat.S_ISSOCK(existing.st_mode):
+            raise FileExistsError("control socket path already exists: %s" % self._path)
+
+        existing_identity = (existing.st_dev, existing.st_ino)
+        probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        probe.settimeout(0.25)
+        try:
+            probe.connect("/proc/self/fd/%d/%s" % (parent_fd, socket_name))
+        except OSError as exc:
+            if exc.errno == errno.ENOENT:
+                return
+            if exc.errno != errno.ECONNREFUSED:
+                raise FileExistsError(
+                    "control socket path is occupied and could not be proven stale: %s"
+                    % self._path
+                ) from exc
+        else:
+            raise FileExistsError(
+                "control socket path already has an active listener: %s" % self._path
+            )
+        finally:
+            probe.close()
+
+        # A refused connection proves there is no listener for this pathname.
+        # Remove only the exact socket inode that was probed; if another owner
+        # replaced the entry in the meantime, the subsequent bind fails closed.
+        self._unlink_if_owned(parent_fd, socket_name, existing_identity)
 
     def stop(self) -> None:
         self._stop.set()

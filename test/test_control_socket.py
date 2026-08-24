@@ -96,6 +96,55 @@ class ControlSocketTest(unittest.TestCase):
             with open(path, "rb") as existing:
                 self.assertEqual(existing.read(), b"owned by another process")
 
+    def test_start_recovers_stale_socket_entry(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "source.sock")
+            stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            stale.bind(path)
+            stale.close()
+
+            server = SourceControlServer(
+                path,
+                SourceDescription("camera", "127.0.0.1", 5004, 640, 360, 10, "camera"),
+            )
+            server.start()
+            try:
+                response = _request(path, {"operation": "describe"})
+                self.assertTrue(response["ok"])
+                self.assertEqual(response["sourceId"], "camera")
+            finally:
+                server.stop()
+            self.assertFalse(os.path.lexists(path))
+
+    def test_start_preserves_socket_with_active_listener(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "source.sock")
+            listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            listener.bind(path)
+            listener.listen(4)
+            original = os.stat(path, follow_symlinks=False)
+
+            server = SourceControlServer(
+                path,
+                SourceDescription("camera", "127.0.0.1", 5004, 640, 360, 10, "camera"),
+            )
+            try:
+                with self.assertRaises(FileExistsError):
+                    server.start()
+                current = os.stat(path, follow_symlinks=False)
+                self.assertEqual(
+                    (current.st_dev, current.st_ino),
+                    (original.st_dev, original.st_ino),
+                )
+
+                client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                client.settimeout(1.0)
+                client.connect(path)
+                client.close()
+            finally:
+                listener.close()
+                os.unlink(path)
+
     def test_start_refuses_symlink_parent(self):
         with tempfile.TemporaryDirectory() as directory:
             real_parent = os.path.join(directory, "real")
