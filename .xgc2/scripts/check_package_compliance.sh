@@ -219,6 +219,10 @@ fi
 # signed APT candidate. Both paths produce exact dependency evidence and run the
 # installed package, including its MediaMTX child.
 grep -Fq 'INTEGRATION_LOCK="${REPO_ROOT}/.xgc2/integration-lock.json"' .xgc2/scripts/build_debs_in_docker.sh
+grep -Fq 'media-edge integration requires host net.core.rmem_max >= 8388608' \
+  .xgc2/scripts/build_debs_in_docker.sh
+grep -Fq 'sudo sysctl -w net.core.rmem_max=8388608' .github/workflows/ci.yml
+grep -Fq 'sudo sysctl -w net.core.rmem_max=8388608' .github/workflows/release.yml
 grep -Fq 'apt-get install -y /workspace/work/media-edge-debs/xgc2-media-edge_*.deb' .xgc2/scripts/build_debs_in_docker.sh
 grep -Fq '/workspace/repo/.xgc2/scripts/configure_xgc2_apt.sh' .xgc2/scripts/build_debs_in_docker.sh
 grep -Fq 'apt-get --print-uris download "xgc2-media-edge=${media_edge_candidate}"' .xgc2/scripts/build_debs_in_docker.sh

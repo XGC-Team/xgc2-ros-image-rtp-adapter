@@ -131,6 +131,15 @@ if [[ "${PRINT_CONFIG}" == "true" ]]; then
   exit 0
 fi
 
+if [[ "${RUN_INTEGRATION}" == "true" ]]; then
+  command -v sysctl >/dev/null
+  host_rmem_max="$(sysctl -n net.core.rmem_max)"
+  if [[ ! "${host_rmem_max}" =~ ^[0-9]+$ || "${host_rmem_max}" -lt 8388608 ]]; then
+    echo "media-edge integration requires host net.core.rmem_max >= 8388608" >&2
+    exit 1
+  fi
+fi
+
 mkdir -p "${OUTPUT_DIR}"
 
 docker pull "${DOCKER_IMAGE}"
