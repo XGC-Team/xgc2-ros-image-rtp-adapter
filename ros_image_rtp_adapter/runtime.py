@@ -62,12 +62,12 @@ class ImageRtpAdapterRuntime:
         self._latest: Optional[_QueuedFrame] = None
         self._active = False
         self._started = False
+        self._pump_stop = threading.Event()
+        self._pump_thread: Optional[threading.Thread] = None
         self._frames_in = 0
         self._frames_out = 0
         self._frames_dropped = 0
         self._last_validation_warning = 0.0
-        self._last_fresh_snapshot_frame = 0
-
         description = SourceDescription(
             source_id=settings.source_id,
             rtp_host=settings.rtp_host,
@@ -76,6 +76,11 @@ class ImageRtpAdapterRuntime:
             height=settings.height,
             fps=settings.fps,
             frame_id=settings.frame_id,
+            snapshot_jpeg_backend=(
+                "source-jpeg-passthrough"
+                if settings.input_message_type == "compressed"
+                else "pillow-libjpeg"
+            ),
         )
         self._control = SourceControlServer(
             settings.control_socket,
@@ -83,6 +88,11 @@ class ImageRtpAdapterRuntime:
             on_set_active=self.set_active,
             on_request_keyframe=self._encoder.request_keyframe,
             on_snapshot=self.snapshot_parts,
+            snapshot_readback=(
+                "fresh-compressed-frame"
+                if settings.input_message_type == "compressed"
+                else "fresh-raw-frame"
+            ),
         )
 
     @property
@@ -96,16 +106,41 @@ class ImageRtpAdapterRuntime:
         # configured property, while leaving the actual encoder unallocated
         # until Edge supplies the first consumer.
         self._encoder.preflight()
-        self._control.start()
+        self._pump_stop.clear()
+        thread = threading.Thread(
+            target=self._run_encoder_pump,
+            name="image-rtp-encoder-pump",
+            daemon=True,
+        )
+        self._pump_thread = thread
         self._started = True
+        try:
+            thread.start()
+            self._control.start()
+        except Exception:
+            self._started = False
+            self._pump_stop.set()
+            with self._frame_condition:
+                self._frame_condition.notify_all()
+            if thread.is_alive():
+                thread.join(timeout=2.0)
+            self._pump_thread = None
+            raise
 
     def stop(self) -> None:
         if not self._started:
             return
         self._started = False
+        self._pump_stop.set()
+        with self._frame_condition:
+            self._frame_condition.notify_all()
         try:
             self._control.stop()
         finally:
+            thread = self._pump_thread
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(timeout=5.0)
+            self._pump_thread = None
             with self._encoder_lock:
                 with self._lock:
                     self._active = False
@@ -124,6 +159,8 @@ class ImageRtpAdapterRuntime:
             try:
                 if desired:
                     self._encoder.start()
+                    with self._frame_condition:
+                        self._frame_condition.notify_all()
                 else:
                     self._encoder.stop()
             except Exception:
@@ -212,6 +249,25 @@ class ImageRtpAdapterRuntime:
             self._frames_out += 1
         return True
 
+    def _run_encoder_pump(self) -> None:
+        while not self._pump_stop.is_set():
+            with self._frame_condition:
+                self._frame_condition.wait_for(
+                    lambda: self._pump_stop.is_set()
+                    or (self._active and bool(self._pending))
+                )
+                if self._pump_stop.is_set():
+                    return
+            try:
+                self.pump()
+            except Exception as exc:
+                self._log_error(f"encoder frame pump failed: {exc}")
+                with self._encoder_lock:
+                    with self._lock:
+                        self._active = False
+                        self._pending.clear()
+                    self._encoder.stop()
+
     def snapshot_jpeg(self) -> Optional[bytes]:
         jpeg, _rgb = self.snapshot_parts(False) or (None, None)
         return jpeg
@@ -223,18 +279,17 @@ class ImageRtpAdapterRuntime:
     ) -> Optional[Tuple[bytes, bytes]]:
         with self._frame_condition:
             if require_fresh:
+                request_frame = self._frames_in
                 deadline = time.monotonic() + max(
                     0.25,
                     min(2.0, 3.0 / float(self.settings.fps)),
                 )
-                while self._frames_in <= self._last_fresh_snapshot_frame:
+                while self._frames_in <= request_frame:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0.0:
                         return None
                     self._frame_condition.wait(remaining)
             frame = self._latest
-            if frame is not None and require_fresh:
-                self._last_fresh_snapshot_frame = self._frames_in
         if frame is None:
             return None
         jpeg: Optional[bytes] = None

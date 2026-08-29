@@ -46,9 +46,6 @@ class ImageRtpAdapterNode(Node):
                 self._on_raw_image,
                 10,
             )
-        self._pump_timer = self.create_timer(
-            1.0 / self._settings.fps, self._runtime.pump
-        )
         self._status_timer = self.create_timer(5.0, self._log_status)
 
         self.get_logger().info(

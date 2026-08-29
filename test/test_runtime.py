@@ -62,7 +62,6 @@ def test_fresh_snapshot_waits_for_the_next_latest_frame(tmp_path):
     first = b"\xff\xd8first\xff\xd9"
     second = b"\xff\xd8second\xff\xd9"
     runtime.submit_compressed(first, "jpeg")
-    assert runtime.snapshot_parts(False, True) == (first, b"")
 
     result = []
     waiter = threading.Thread(
@@ -74,6 +73,22 @@ def test_fresh_snapshot_waits_for_the_next_latest_frame(tmp_path):
     runtime.submit_compressed(second, "jpeg")
     waiter.join(timeout=1.0)
     assert result == [(second, b"")]
+
+
+def test_compressed_snapshot_is_exact_passthrough_without_raw_jpeg_encoding(
+    tmp_path, monkeypatch
+):
+    runtime, _encoder = make_runtime(tmp_path)
+    sentinel = b"\xff\xd8physical-camera-sentinel\x00\x01\xff\xd9"
+
+    def unexpected_raw_encode(*_args, **_kwargs):
+        raise AssertionError("compressed snapshot must not invoke raw JPEG encoding")
+
+    monkeypatch.setattr(
+        "ros_image_rtp_adapter.frames.RawFrame.to_jpeg", unexpected_raw_encode
+    )
+    runtime.submit_compressed(sentinel, "jpeg")
+    assert runtime.snapshot_parts(False, False) == (sentinel, b"")
 
 
 def test_runtime_set_active_discards_pending_but_accepts_fresh_recovery(tmp_path):
@@ -136,5 +151,26 @@ def test_runtime_start_preflights_without_allocating_encoder(tmp_path):
         assert encoder.preflight_calls == 1
         assert not encoder.running
         assert runtime.status()["active"] is False
+    finally:
+        runtime.stop()
+
+
+def test_started_runtime_pumps_each_arriving_frame_without_a_same_rate_poll_timer(tmp_path):
+    runtime, encoder = make_runtime(tmp_path, fps=30.0)
+    frames = [b"\xff\xd8frame-%02d\xff\xd9" % index for index in range(20)]
+
+    runtime.start()
+    try:
+        runtime.set_active(True)
+        for frame in frames:
+            assert runtime.submit_compressed(frame, "jpeg")
+            deadline = time.monotonic() + 0.5
+            while len(encoder.frames) < len(frames[: frames.index(frame) + 1]) and time.monotonic() < deadline:
+                time.sleep(0.001)
+        deadline = time.monotonic() + 1.0
+        while len(encoder.frames) < len(frames) and time.monotonic() < deadline:
+            time.sleep(0.001)
+        assert encoder.frames == frames
+        assert runtime.status()["frames_dropped"] == 0
     finally:
         runtime.stop()

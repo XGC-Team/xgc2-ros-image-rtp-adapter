@@ -26,6 +26,9 @@ class SourceDescription:
     height: int
     fps: float
     frame_id: str
+    snapshot_jpeg_policy: str = "source"
+    snapshot_jpeg_backend: str = "source-jpeg-passthrough"
+    snapshot_jpeg_hardware_state: str = "source-owned"
     capabilities: tuple = (
         "set-active", "request-keyframe", "snapshot", "fresh-snapshot",
     )
@@ -44,6 +47,9 @@ class SourceDescription:
             "height": int(self.height),
             "fps": float(self.fps),
             "frameId": self.frame_id,
+            "snapshotJpegPolicy": self.snapshot_jpeg_policy,
+            "snapshotJpegBackend": self.snapshot_jpeg_backend,
+            "snapshotJpegHardwareState": self.snapshot_jpeg_hardware_state,
             "capabilities": list(self.capabilities),
             "timestampClockDomain": "system_realtime",
         }
@@ -60,12 +66,18 @@ class SourceControlServer:
         on_set_active: Optional[Callable[[bool], None]] = None,
         on_request_keyframe: Optional[Callable[[], None]] = None,
         on_snapshot: Optional[Callable[[bool, bool], Optional[bytes]]] = None,
+        snapshot_backend: Optional[str] = None,
+        snapshot_readback: str = "latest-source-frame",
     ) -> None:
         self._path = path
         self._description = description
         self._on_set_active = on_set_active
         self._on_request_keyframe = on_request_keyframe
         self._on_snapshot = on_snapshot
+        self._snapshot_backend = (
+            snapshot_backend or description.snapshot_jpeg_backend
+        )
+        self._snapshot_readback = snapshot_readback
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._server: Optional[socket.socket] = None
@@ -342,6 +354,8 @@ class SourceControlServer:
                 "height": height,
                 "frameId": self._description.frame_id,
                 "pixelFormat": "rgb8",
+                "jpegBackend": self._snapshot_backend,
+                "jpegReadback": self._snapshot_readback,
                 "timestampNanoseconds": time.time_ns(),
                 "timestampClockDomain": "system_realtime",
                 "cameraMatrix": [float(width), 0.0, width / 2.0, 0.0, float(width), height / 2.0, 0.0, 0.0, 1.0],

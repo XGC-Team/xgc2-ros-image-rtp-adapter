@@ -69,6 +69,9 @@ class ControlSocketTest(unittest.TestCase):
             self.assertEqual(desc["codec"], "H264")
             self.assertEqual(desc["rtpPayloadType"], 96)
             self.assertEqual(desc["rtpPort"], 5004)
+            self.assertEqual(desc["snapshotJpegPolicy"], "source")
+            self.assertEqual(desc["snapshotJpegBackend"], "source-jpeg-passthrough")
+            self.assertEqual(desc["snapshotJpegHardwareState"], "source-owned")
             self.assertIn("set-active", desc["capabilities"])
             self.assertIn("fresh-snapshot", desc["capabilities"])
 
@@ -86,6 +89,8 @@ class ControlSocketTest(unittest.TestCase):
             self.assertTrue(resp["ok"])
             self.assertEqual(resp["jpegBytes"], len(snaps["jpeg"]))
             self.assertEqual(resp["rgbBytes"], 0)
+            self.assertEqual(resp["jpegBackend"], "source-jpeg-passthrough")
+            self.assertEqual(resp["jpegReadback"], "latest-source-frame")
             self.assertEqual(snaps["include_rgb"], [(False, True)])
 
             resp = _request(path, {"operation": "set-active", "active": "yes"})

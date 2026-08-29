@@ -8,7 +8,7 @@ the same local source contract used by every other XGC2 camera source:
 - H264/RTP payload type 96 on a fixed loopback UDP port;
 - newline-delimited source control on an absolute Unix socket;
 - stable `sourceId`, dimensions, rate, and optical frame metadata;
-- independent `set-active`, keyframe, and snapshot operations.
+- independent `set-active`, keyframe, snapshot, and fresh-snapshot operations.
 
 Topic names, ROS version, message type, pixel format, encoder backend, element
 factories, and element properties are configuration. There is no Odin, B2,
@@ -52,6 +52,14 @@ parameters, logging, and timers.
 
 Raw ROS row padding is removed once and the packed frame enters FFmpeg or
 GStreamer directly. It is never converted to JPEG before H264 encoding.
+
+For `compressed` input, the adapter also retains exactly one latest source JPEG
+for snapshot transactions. `requireFresh=true` records the frame sequence when
+the request arrives and blocks until a later message replaces it; the request
+therefore never reuses a pre-request frame. JPEG-only snapshots return those
+exact camera bytes as `source-jpeg-passthrough` and do not invoke Pillow or a
+second JPEG encoder. Raw input retains the compatible Pillow/libjpeg snapshot
+path only when that source mode is explicitly selected.
 Dimensions and raw encoding are explicit, fixed Session configuration; a
 mismatched message is rejected instead of silently changing the stream
 contract. Each received frame is encoded at most once, so a stopped ROS source
@@ -222,6 +230,15 @@ AgentLink, Core, SSE, or the robot telemetry plane.
 
 Runtime markers are `@bitrate`, `@bitrate_kbps`, `@fps`, `@gop`, `@width`,
 `@height`, and, for caps, `@fps_fraction`.
+
+The built-in `h264_nvenc` path is not the unconstrained FFmpeg default. It uses
+4:2:0 High profile, low-latency CBR, `maxrate == bitrate`, a one-second VBV
+(`bufsize == bitrate`), fixed one-second GOP, no B-frames, no lookahead, no
+scene-cut I-frames, and strict GOP rate control. This makes motion-induced RTP
+bursts bounded enough for the paired Media Edge receive queue to be calculated.
+Do not validate this path with a static camera alone: acceptance must include
+high-entropy motion and prove source FPS, adapter output/drop counters, kernel
+socket drops, Edge `framesInError`, and browser decoded/presented FPS separately.
 
 ## Gates
 

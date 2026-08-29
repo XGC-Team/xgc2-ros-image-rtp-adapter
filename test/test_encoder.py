@@ -66,6 +66,18 @@ def test_non_x264_encoder_does_not_receive_x264_only_options():
     assert "-x264-params" not in command
 
 
+def test_nvenc_uses_a_bounded_low_latency_burst_contract():
+    command = make_encoder(encoder="h264_nvenc")._build_command()
+
+    assert command[command.index("-pix_fmt") + 1] == "yuv420p"
+    assert command[command.index("-rc") + 1] == "cbr_ld_hq"
+    assert command[command.index("-maxrate") + 1] == "2500000"
+    assert command[command.index("-bufsize") + 1] == "2500000"
+    assert command[command.index("-bf") + 1] == "0"
+    assert command[command.index("-strict_gop") + 1] == "1"
+    assert command[command.index("-no-scenecut") + 1] == "1"
+
+
 def test_ffmpeg_raw_input_is_explicit_fixed_size_and_never_roundtrips_through_jpeg():
     command = FFmpegRtpEncoder(
         ffmpeg_path="ffmpeg",

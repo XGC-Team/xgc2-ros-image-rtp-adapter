@@ -47,9 +47,6 @@ class ImageRtpAdapterROS1Node:
                 queue_size=10,
                 buff_size=64 * 1024 * 1024,
             )
-        self._pump_timer = rospy.Timer(
-            rospy.Duration.from_sec(1.0 / self._settings.fps), self._pump
-        )
         self._status_timer = rospy.Timer(rospy.Duration.from_sec(5.0), self._log_status)
         rospy.loginfo(
             "image_rtp_adapter ready: ros=1 topic=%s message=%s source_id=%s "
@@ -75,9 +72,6 @@ class ImageRtpAdapterROS1Node:
             step=message.step,
             encoding=message.encoding,
         )
-
-    def _pump(self, _event) -> None:
-        self._runtime.pump()
 
     def _log_status(self, _event) -> None:
         status = self._runtime.status()

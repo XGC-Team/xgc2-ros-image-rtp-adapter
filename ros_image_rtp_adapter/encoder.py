@@ -356,6 +356,47 @@ class FFmpegRtpEncoder(SubprocessRtpEncoder):
                     "repeat-headers=1:scenecut=0",
                 ]
             )
+        elif self._encoder == "h264_nvenc":
+            # Bound the access-unit burst before sizing the loopback RTP
+            # receive queue. A nominal average bitrate alone is not a bound:
+            # motion or a scene cut can otherwise create an arbitrarily larger
+            # short burst even while a static camera appears to sustain 30 Hz.
+            command.extend(
+                [
+                    "-preset",
+                    "llhq",
+                    "-profile:v",
+                    "high",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-rc",
+                    "cbr_ld_hq",
+                    "-zerolatency",
+                    "1",
+                    "-delay",
+                    "0",
+                    "-rc-lookahead",
+                    "0",
+                    "-bf",
+                    "0",
+                    "-g",
+                    str(gop),
+                    "-keyint_min",
+                    str(gop),
+                    "-no-scenecut",
+                    "1",
+                    "-strict_gop",
+                    "1",
+                    "-forced-idr",
+                    "1",
+                    "-b:v",
+                    str(self._bitrate),
+                    "-maxrate",
+                    str(self._bitrate),
+                    "-bufsize",
+                    str(self._bitrate),
+                ]
+            )
         else:
             # Minimal codec-level defaults. Hardware-specific flags belong in
             # ffmpeg_encoder_args_json so no vendor assumptions leak here.
