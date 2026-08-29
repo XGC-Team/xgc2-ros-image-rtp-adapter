@@ -1,5 +1,7 @@
 from ros_image_rtp_adapter.runtime import ImageRtpAdapterRuntime
 from ros_image_rtp_adapter.settings import AdapterSettings
+import threading
+import time
 
 
 class FakeEncoder:
@@ -52,6 +54,26 @@ def test_runtime_encodes_each_fresh_compressed_frame_once(tmp_path):
     assert not runtime.pump()
     assert encoder.frames == [jpeg]
     assert runtime.snapshot_jpeg() == jpeg
+    assert runtime.snapshot_parts(False) == (jpeg, b"")
+
+
+def test_fresh_snapshot_waits_for_the_next_latest_frame(tmp_path):
+    runtime, _encoder = make_runtime(tmp_path, fps=20.0)
+    first = b"\xff\xd8first\xff\xd9"
+    second = b"\xff\xd8second\xff\xd9"
+    runtime.submit_compressed(first, "jpeg")
+    assert runtime.snapshot_parts(False, True) == (first, b"")
+
+    result = []
+    waiter = threading.Thread(
+        target=lambda: result.append(runtime.snapshot_parts(False, True))
+    )
+    waiter.start()
+    time.sleep(0.03)
+    assert result == []
+    runtime.submit_compressed(second, "jpeg")
+    waiter.join(timeout=1.0)
+    assert result == [(second, b"")]
 
 
 def test_runtime_set_active_discards_pending_but_accepts_fresh_recovery(tmp_path):

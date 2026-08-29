@@ -26,7 +26,9 @@ class SourceDescription:
     height: int
     fps: float
     frame_id: str
-    capabilities: tuple = ("set-active", "request-keyframe", "snapshot")
+    capabilities: tuple = (
+        "set-active", "request-keyframe", "snapshot", "fresh-snapshot",
+    )
 
     def as_dict(self) -> Dict:
         return {
@@ -57,7 +59,7 @@ class SourceControlServer:
         *,
         on_set_active: Optional[Callable[[bool], None]] = None,
         on_request_keyframe: Optional[Callable[[], None]] = None,
-        on_snapshot: Optional[Callable[[], Optional[bytes]]] = None,
+        on_snapshot: Optional[Callable[[bool, bool], Optional[bytes]]] = None,
     ) -> None:
         self._path = path
         self._description = description
@@ -185,15 +187,29 @@ class SourceControlServer:
 
     def stop(self) -> None:
         self._stop.set()
+        server = self._server
+        if server is not None:
+            wake = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            wake.settimeout(0.1)
+            try:
+                # A local connection wakes accept portably; closing a listening
+                # fd from another thread does not wake accept on every Linux
+                # runtime. The empty connection returns immediately in the
+                # handler because the stop-side closes it without a request.
+                wake.connect(self._path)
+            except OSError:
+                pass
+            finally:
+                wake.close()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             self._thread = None
-        if self._server is not None:
+        self._server = None
+        if server is not None:
             try:
-                self._server.close()
+                server.close()
             except OSError:
                 pass
-            self._server = None
         if self._parent_fd is not None:
             self._unlink_if_owned(
                 self._parent_fd,
@@ -228,10 +244,11 @@ class SourceControlServer:
         os.unlink(socket_name, dir_fd=parent_fd)
 
     def _serve_loop(self) -> None:
-        assert self._server is not None
+        server = self._server
+        assert server is not None
         while not self._stop.is_set():
             try:
-                conn, _ = self._server.accept()
+                conn, _ = server.accept()
             except socket.timeout:
                 continue
             except OSError:
@@ -295,15 +312,25 @@ class SourceControlServer:
             self._write_json(conn, {"ok": True})
             return
         if operation == "snapshot":
+            include_rgb = request.get("includeRgb", True)
+            if not isinstance(include_rgb, bool):
+                self._write_json(conn, {"ok": False, "error": "includeRgb must be a boolean"})
+                return
+            require_fresh = request.get("requireFresh", False)
+            if not isinstance(require_fresh, bool):
+                self._write_json(conn, {"ok": False, "error": "requireFresh must be a boolean"})
+                return
             jpeg = b""
             rgb = b""
             if self._on_snapshot is not None:
-                payload = self._on_snapshot()
+                payload = self._on_snapshot(include_rgb, require_fresh)
                 if isinstance(payload, tuple) and len(payload) == 2:
                     jpeg = payload[0] or b""
                     rgb = payload[1] or b""
                 else:
                     jpeg = payload or b""
+            if not include_rgb:
+                rgb = b""
             width = int(self._description.width)
             height = int(self._description.height)
             header = {

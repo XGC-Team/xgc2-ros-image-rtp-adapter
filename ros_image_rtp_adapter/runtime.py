@@ -54,6 +54,7 @@ class ImageRtpAdapterRuntime:
             **settings.encoder_kwargs(),
         )
         self._lock = threading.Lock()
+        self._frame_condition = threading.Condition(self._lock)
         self._encoder_lock = threading.Lock()
         self._pending: Deque[_QueuedFrame] = deque(
             maxlen=1 if settings.drop_to_latest else 32
@@ -65,6 +66,7 @@ class ImageRtpAdapterRuntime:
         self._frames_out = 0
         self._frames_dropped = 0
         self._last_validation_warning = 0.0
+        self._last_fresh_snapshot_frame = 0
 
         description = SourceDescription(
             source_id=settings.source_id,
@@ -188,9 +190,10 @@ class ImageRtpAdapterRuntime:
         return self._enqueue(_QueuedFrame(encoder_data=raw.data, raw_snapshot=raw))
 
     def _enqueue(self, frame: _QueuedFrame) -> bool:
-        with self._lock:
+        with self._frame_condition:
             self._latest = frame
             self._frames_in += 1
+            self._frame_condition.notify_all()
             if not self._active:
                 return True
             if len(self._pending) == self._pending.maxlen:
@@ -210,12 +213,28 @@ class ImageRtpAdapterRuntime:
         return True
 
     def snapshot_jpeg(self) -> Optional[bytes]:
-        jpeg, _rgb = self.snapshot_parts() or (None, None)
+        jpeg, _rgb = self.snapshot_parts(False) or (None, None)
         return jpeg
 
-    def snapshot_parts(self) -> Optional[Tuple[bytes, bytes]]:
-        with self._lock:
+    def snapshot_parts(
+        self,
+        include_rgb: bool = True,
+        require_fresh: bool = False,
+    ) -> Optional[Tuple[bytes, bytes]]:
+        with self._frame_condition:
+            if require_fresh:
+                deadline = time.monotonic() + max(
+                    0.25,
+                    min(2.0, 3.0 / float(self.settings.fps)),
+                )
+                while self._frames_in <= self._last_fresh_snapshot_frame:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0.0:
+                        return None
+                    self._frame_condition.wait(remaining)
             frame = self._latest
+            if frame is not None and require_fresh:
+                self._last_fresh_snapshot_frame = self._frames_in
         if frame is None:
             return None
         jpeg: Optional[bytes] = None
@@ -227,12 +246,12 @@ class ImageRtpAdapterRuntime:
                 jpeg = frame.raw_snapshot.to_jpeg()
             except Exception as exc:
                 self._log_error(f"raw snapshot JPEG conversion failed: {exc}")
-        if frame.raw_snapshot is not None:
+        if include_rgb and frame.raw_snapshot is not None:
             try:
                 rgb = frame.raw_snapshot.to_rgb()
             except Exception as exc:
                 self._log_error(f"raw snapshot RGB conversion failed: {exc}")
-        if jpeg and not rgb:
+        if include_rgb and jpeg and not rgb:
             try:
                 from io import BytesIO
                 from PIL import Image

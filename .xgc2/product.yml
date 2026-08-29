@@ -1,7 +1,7 @@
 schema: xgc2.product.v1
 id: xgc2-ros-image-rtp-adapter
 name: XGC2 ROS Image RTP Adapter
-version: 0.4.3
+version: 0.4.4
 kind: mixed
 summary: >-
   Parameterized ROS 1/ROS 2 Image or CompressedImage to H264/RTP adapter
@@ -86,13 +86,13 @@ ownership:
   - /opt/ros/humble/lib/ros_image_rtp_adapter
   - /opt/ros/humble/share/ros_image_rtp_adapter
   - /opt/ros/humble/lib/python3.10/site-packages/ros_image_rtp_adapter
-  - /opt/ros/humble/lib/python3.10/site-packages/ros_image_rtp_adapter-0.4.3-py3.10.egg-info
+  - /opt/ros/humble/lib/python3.10/site-packages/ros_image_rtp_adapter-0.4.4-py3.10.egg-info
   - /opt/ros/humble/share/ament_index/resource_index/packages/ros_image_rtp_adapter
   - /opt/ros/humble/share/colcon-core/packages/ros_image_rtp_adapter
   - /opt/ros/jazzy/lib/ros_image_rtp_adapter
   - /opt/ros/jazzy/share/ros_image_rtp_adapter
   - /opt/ros/jazzy/lib/python3.12/site-packages/ros_image_rtp_adapter
-  - /opt/ros/jazzy/lib/python3.12/site-packages/ros_image_rtp_adapter-0.4.3-py3.12.egg-info
+  - /opt/ros/jazzy/lib/python3.12/site-packages/ros_image_rtp_adapter-0.4.4-py3.12.egg-info
   - /opt/ros/jazzy/share/ament_index/resource_index/packages/ros_image_rtp_adapter
   - /opt/ros/jazzy/share/colcon-core/packages/ros_image_rtp_adapter
   - /usr/share/doc/ros-noetic-xgc2-ros-image-rtp-adapter
@@ -111,6 +111,6 @@ release:
   dependency_policy:
     xgc2-media-edge: verify
   apt_versions:
-    focal: 0.4.3
-    jammy: 0.4.3
-    noble: 0.4.3
+    focal: 0.4.4
+    jammy: 0.4.4
+    noble: 0.4.4

@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <package format="2">
   <name>ros_image_rtp_adapter</name>
-  <version>0.4.3</version>
+  <version>0.4.4</version>
   <description>
     ROS 1 Noetic wrapper for the XGC2 raw or compressed image to H264/RTP
     adapter. It uses the same hardware-neutral runtime and media-edge source

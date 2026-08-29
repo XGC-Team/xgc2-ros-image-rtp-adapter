@@ -40,7 +40,7 @@ class ControlSocketTest(unittest.TestCase):
         os.unlink(path)
 
         active = {"value": True}
-        snaps = {"jpeg": b"\xff\xd8fakejpeg\xff\xd9"}
+        snaps = {"jpeg": b"\xff\xd8fakejpeg\xff\xd9", "include_rgb": []}
 
         server = SourceControlServer(
             path,
@@ -55,7 +55,9 @@ class ControlSocketTest(unittest.TestCase):
             ),
             on_set_active=lambda v: active.__setitem__("value", v),
             on_request_keyframe=lambda: None,
-            on_snapshot=lambda: snaps["jpeg"],
+            on_snapshot=lambda include_rgb, require_fresh: (
+                snaps["include_rgb"].append((include_rgb, require_fresh)) or snaps["jpeg"]
+            ),
         )
         server.start()
         try:
@@ -68,6 +70,7 @@ class ControlSocketTest(unittest.TestCase):
             self.assertEqual(desc["rtpPayloadType"], 96)
             self.assertEqual(desc["rtpPort"], 5004)
             self.assertIn("set-active", desc["capabilities"])
+            self.assertIn("fresh-snapshot", desc["capabilities"])
 
             resp = _request(path, {"operation": "set-active", "active": False})
             self.assertTrue(resp["ok"])
@@ -75,6 +78,15 @@ class ControlSocketTest(unittest.TestCase):
 
             resp = _request(path, {"operation": "request-keyframe"})
             self.assertTrue(resp["ok"])
+
+            resp = _request(path, {
+                "operation": "snapshot", "snapshotId": "jpeg-only", "includeRgb": False,
+                "requireFresh": True,
+            })
+            self.assertTrue(resp["ok"])
+            self.assertEqual(resp["jpegBytes"], len(snaps["jpeg"]))
+            self.assertEqual(resp["rgbBytes"], 0)
+            self.assertEqual(snaps["include_rgb"], [(False, True)])
 
             resp = _request(path, {"operation": "set-active", "active": "yes"})
             self.assertFalse(resp["ok"])
@@ -95,6 +107,18 @@ class ControlSocketTest(unittest.TestCase):
                 server.start()
             with open(path, "rb") as existing:
                 self.assertEqual(existing.read(), b"owned by another process")
+
+    def test_stop_wakes_the_blocked_accept_without_waiting_for_its_timeout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "source.sock")
+            server = SourceControlServer(
+                path,
+                SourceDescription("camera", "127.0.0.1", 5004, 640, 360, 10, "camera"),
+            )
+            server.start()
+            started = time.monotonic()
+            server.stop()
+            self.assertLess(time.monotonic() - started, 0.2)
 
     def test_start_recovers_stale_socket_entry(self):
         with tempfile.TemporaryDirectory() as directory:
