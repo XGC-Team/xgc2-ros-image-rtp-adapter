@@ -236,6 +236,7 @@ lib/python3/dist-packages/${ROS_PACKAGE}/__init__.py
 lib/python3/dist-packages/${ROS_PACKAGE}/control_socket.py
 lib/python3/dist-packages/${ROS_PACKAGE}/encoder.py
 lib/python3/dist-packages/${ROS_PACKAGE}/frames.py
+lib/python3/dist-packages/${ROS_PACKAGE}/h264.py
 lib/python3/dist-packages/${ROS_PACKAGE}/node.py
 lib/python3/dist-packages/${ROS_PACKAGE}/publish_test_jpeg.py
 lib/python3/dist-packages/${ROS_PACKAGE}/ros1_node.py
@@ -263,6 +264,7 @@ ${PYTHON_SITE}/${ROS_PACKAGE}/__init__.py
 ${PYTHON_SITE}/${ROS_PACKAGE}/control_socket.py
 ${PYTHON_SITE}/${ROS_PACKAGE}/encoder.py
 ${PYTHON_SITE}/${ROS_PACKAGE}/frames.py
+${PYTHON_SITE}/${ROS_PACKAGE}/h264.py
 ${PYTHON_SITE}/${ROS_PACKAGE}/node.py
 ${PYTHON_SITE}/${ROS_PACKAGE}/publish_test_jpeg.py
 ${PYTHON_SITE}/${ROS_PACKAGE}/ros1_node.py
