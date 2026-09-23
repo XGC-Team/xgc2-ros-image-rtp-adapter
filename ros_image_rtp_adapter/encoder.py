@@ -387,6 +387,9 @@ class FFmpegRtpEncoder(SubprocessEncoder):
         command = [
             self._ffmpeg_path, "-hide_banner", "-loglevel", "error",
             "-fflags", "nobuffer", "-flags", "low_delay",
+            # The first frame carries every stream parameter; default probing
+            # would hold back the first IDR for a newly joining viewer.
+            "-probesize", "32", "-analyzeduration", "0",
         ]
         command.extend(_ffmpeg_input_arguments(self._input_format, self._width, self._height, self._fps))
         command.extend(["-an", "-vf", video_filter, "-c:v", self._encoder])

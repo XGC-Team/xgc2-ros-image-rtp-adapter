@@ -264,6 +264,10 @@ def test_rtp_output_never_carries_the_ros_preview_pipe():
     assert command[-3:] == ["-payload_type", "96", "rtp://127.0.0.1:5004?pkt_size=1200"]
     assert "pipe:1" not in command and "tee" not in command
     assert "-lowres" not in command
+    # Starts on the first frame, as the former shared tee command did.
+    assert command[command.index("-probesize") + 1] == "32"
+    assert command[command.index("-analyzeduration") + 1] == "0"
+    assert command.index("-probesize") < command.index("-i")
 
 
 def test_preview_decodes_an_exact_half_size_jpeg_at_preview_resolution():
