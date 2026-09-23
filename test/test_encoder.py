@@ -3,8 +3,10 @@ from unittest.mock import Mock, patch
 import pytest
 
 from ros_image_rtp_adapter.encoder import (
+    FFmpegH264PreviewEncoder,
     FFmpegRtpEncoder,
     GStreamerRtpEncoder,
+    create_h264_preview_encoder,
     create_rtp_encoder,
 )
 
@@ -239,3 +241,97 @@ def test_encoder_finishes_short_pipe_writes_before_accepting_next_frame():
     encoder.write_frame(b"jpeg")
     assert [bytes(call.args[0]) for call in process.stdin.write.call_args_list] == [b"jpeg", b"eg"]
     process.stdin.flush.assert_called_once_with()
+
+
+def make_preview(**overrides):
+    values = {
+        "ffmpeg_path": "ffmpeg",
+        "source_width": 3840,
+        "source_height": 2160,
+        "width": 1920,
+        "height": 1080,
+        "fps": 30.0,
+        "bitrate": 8_000_000,
+        "encoder": "h264_nvenc",
+    }
+    values.update(overrides)
+    return FFmpegH264PreviewEncoder(**values)
+
+
+def test_rtp_output_never_carries_the_ros_preview_pipe():
+    command = make_encoder(encoder="h264_nvenc")._build_command()
+
+    assert command[-3:] == ["-payload_type", "96", "rtp://127.0.0.1:5004?pkt_size=1200"]
+    assert "pipe:1" not in command and "tee" not in command
+    assert "-lowres" not in command
+
+
+def test_preview_decodes_an_exact_half_size_jpeg_at_preview_resolution():
+    command = make_preview()._build_command()
+
+    lowres = command.index("-lowres")
+    assert command[lowres + 1] == "1"
+    assert lowres < command.index("-i")  # decoder option, not an output option
+    assert command[command.index("-vf") + 1] == "scale=1920:1080:flags=area"
+    assert "pad" not in command[command.index("-vf") + 1]
+    assert command[command.index("-b:v") + 1] == "8000000"
+    assert command[command.index("-maxrate") + 1] == "8000000"
+    assert command[command.index("-bufsize") + 1] == "8000000"
+    assert command[command.index("-delay") + 1] == "2"
+    assert command[command.index("-rc") + 1] == "cbr_ld_hq"
+    assert command[command.index("-bsf:v") + 1] == "dump_extra=freq=keyframe,h264_metadata=aud=insert"
+    assert command[-3:] == ["-f", "h264", "pipe:1"]
+    assert not any(argument.startswith("rtp://") for argument in command)
+
+
+def test_preview_area_averages_other_ratios_and_raw_input():
+    other_ratio = make_preview(source_width=2560, source_height=1440)._build_command()
+    raw = make_preview(input_format="bgr8")._build_command()
+
+    assert "-lowres" not in other_ratio and "-lowres" not in raw
+    assert other_ratio[other_ratio.index("-vf") + 1] == "scale=1920:1080:flags=area"
+    # Raw frames are read at the configured source size, then downscaled.
+    assert raw[raw.index("-video_size") + 1] == "3840x2160"
+    assert raw[raw.index("-vf") + 1] == "scale=1920:1080:flags=area"
+    assert raw[raw.index("-delay") + 1] == "0"
+
+
+def test_preview_requires_source_timestamps_and_the_ffmpeg_backend():
+    with pytest.raises(ValueError, match="timestamp"):
+        make_preview().write_frame(b"jpeg")
+    with pytest.raises(ValueError, match="FFmpeg"):
+        create_h264_preview_encoder(backend="gstreamer")
+
+
+def test_stop_releases_a_writer_blocked_on_a_stalled_encoder():
+    import threading
+
+    encoder = make_encoder()
+    released = threading.Event()
+    blocked = threading.Event()
+
+    class StalledPipe:
+        def write(self, _data):
+            blocked.set()
+            released.wait(5)
+            raise ValueError("write to closed file")
+
+        def flush(self):
+            pass
+
+        def close(self):
+            released.set()
+
+    process = Mock()
+    process.stdin = StalledPipe()
+    process.poll.return_value = 0
+    encoder._proc = process
+    writer = threading.Thread(target=encoder.write_frame, args=(b"frame",))
+    writer.start()
+    assert blocked.wait(1)
+    with patch("ros_image_rtp_adapter.encoder.subprocess.Popen") as popen:
+        encoder.stop()  # must not wait for the blocked writer's lock
+        writer.join(timeout=2)
+    assert not writer.is_alive()
+    popen.assert_not_called()  # a stopped encoder is not restarted by the failed write
+    assert encoder._proc is None

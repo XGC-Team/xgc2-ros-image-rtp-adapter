@@ -22,7 +22,7 @@ class ImageRtpAdapterROS1Node:
                 f"invalid image RTP adapter configuration: {exc}"
             )
 
-        video_topic = str(rospy.get_param("~video_topic", "")).strip()
+        video_topic = self._settings.video_topic
         self._video_publisher = None
         if video_topic:
             from foxglove_msgs.msg import CompressedVideo
@@ -68,6 +68,17 @@ class ImageRtpAdapterROS1Node:
             self._settings.rtp_port,
             self._settings.control_socket,
         )
+        if video_topic:
+            rospy.loginfo(
+                "image_rtp_adapter ROS H264 preview: topic=%s %dx%d bitrate=%d "
+                "(encoded only while subscribed; RTP keeps %dx%d)",
+                video_topic,
+                self._settings.video_width,
+                self._settings.video_height,
+                self._settings.video_bitrate,
+                self._settings.width,
+                self._settings.height,
+            )
 
     def _on_compressed_image(self, message: CompressedImage) -> None:
         self._runtime.submit_compressed(
@@ -98,33 +109,8 @@ class ImageRtpAdapterROS1Node:
         self._video_publisher.publish(message)
 
     def _log_status(self, _event) -> None:
-        status = self._runtime.status()
-        if not status["active"]:
-            rospy.loginfo(
-                "status idle source_id=%s frames_in=%d encoder_released=%s",
-                self._settings.source_id,
-                status["frames_in"],
-                not status["encoder_running"],
-            )
-            return
-        if not status["encoder_running"]:
-            rospy.logerr(
-                "encoder backend=%s is not running: %s",
-                self._settings.encoder_backend,
-                status["encoder_diagnostic"] or "no diagnostic",
-            )
-            return
-        rospy.loginfo(
-            "status frames_in=%d frames_out=%d frames_dropped=%d "
-            "pending=%d active=%s topic=%s backend=%s",
-            status["frames_in"],
-            status["frames_out"],
-            status["frames_dropped"],
-            status["pending"],
-            status["active"],
-            self._settings.image_topic,
-            self._settings.encoder_backend,
-        )
+        for level, message in self._runtime.status_report():
+            (rospy.logerr if level == "error" else rospy.loginfo)("status %s", message)
 
 
 def main() -> None:

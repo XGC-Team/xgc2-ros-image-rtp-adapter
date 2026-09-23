@@ -17,6 +17,11 @@ image_rtp_adapter:
     height: 720
     fps: 15.0
     bitrate: 2500000
+    # The H264 preview output is ROS 1 only; a non-empty topic fails closed.
+    video_topic: ""
+    video_width: 1280
+    video_height: 720
+    video_bitrate: 2500000
     encoder_backend: ffmpeg
     encoder: libx264
     ffmpeg_path: ffmpeg
