@@ -220,6 +220,9 @@ AgentLink, Core, SSE, or the robot telemetry plane.
 | `control_socket` | `/tmp/xgc2-image-rtp-adapter.sock` | Absolute Unix control socket |
 | `width` / `height` / `fps` | 1280 / 720 / 15 | Fixed output and raw-input contract |
 | `bitrate` | 2500000 | Target H264 bitrate |
+| `video_topic` | empty | ROS 1 `foxglove_msgs/CompressedVideo` preview topic; empty disables it |
+| `video_width` / `video_height` | 1280 / 720 | Preview geometry; never larger than, same aspect as, `width`/`height` |
+| `video_bitrate` | 2500000 | Preview low-latency CBR bitrate |
 | `encoder_backend` | `ffmpeg` | Explicit `ffmpeg` or `gstreamer` |
 | `encoder` | `libx264` | FFmpeg encoder factory |
 | `ffmpeg_encoder_args_json` | `[]` | Structured FFmpeg argument array |
@@ -267,7 +270,8 @@ Local focused gates:
 PYTHONPATH=. python3 -m pytest \
   test/test_artifact_manifest.py \
   test/test_control_socket.py test/test_encoder.py \
-  test/test_frames.py test/test_media_edge_source_roster.py \
+  test/test_frames.py test/test_h264.py test/test_h264_integration.py \
+  test/test_media_edge_source_roster.py test/test_preview_geometry.py \
   test/test_runtime.py -q
 ./.xgc2/scripts/check_package_compliance.sh
 
@@ -286,21 +290,55 @@ dependency_set_digest="$(python3 .xgc2/scripts/read_integration_lock.py \
 Apache-2.0
 
 
-### ROS 1 H264 preview shared with RTP
+### ROS 1 H264 preview (independent of RTP)
 
-An explicit `~video_topic` enables `foxglove_msgs/CompressedVideo` output from
-the same FFmpeg encoding operation used for RTP. The original ROS Image or
-CompressedImage timestamp follows the retained frame through the bounded input
-queue. No second JPEG decode/encode pass is introduced for the viewer. ROS
-subscribers and Media Edge independently hold the encoder active; closing one
-consumer does not stop the other. This output currently requires FFmpeg and
-zero B-frames. JPEG snapshots remain source-resolution passthrough.
+An explicit `~video_topic` enables `foxglove_msgs/CompressedVideo` output for
+ROS viewers such as a Lichtblick image panel. It is a second FFmpeg encoder
+with its own geometry (`video_width` x `video_height`) and budget
+(`video_bitrate`), fed the same retained source frames:
 
-The Annex-B stream contains AUD boundaries and repeated parameter sets for
-late joins at the next IDR. Its bounded framing reader emits a frame when the
-next AUD arrives (one frame of framing delay); it does not label decode time as
-capture time. Missing source timestamps are rejected. GStreamer keeps its
-existing RTP-only path until an equivalent encoded-packet tap is implemented.
+```text
+source JPEG/raw frame --+--> RTP encoder (width x height, bitrate)  -> Media Edge
+                        `--> preview encoder (video_* geometry)     -> ~video_topic
+```
+
+Each encoder runs only while its own consumers exist: Media Edge
+`set-active` holds the RTP encoder, ROS subscribers hold the preview encoder.
+A WebRTC viewer joining or leaving therefore never restarts the ROS stream,
+and a ROS subscriber never restarts RTP (whose timestamps must not regress
+under live WebRTC sessions). With only ROS subscribers there is exactly one
+encode, at preview resolution. Both run as separate processes rather than one
+`split` graph because the Ubuntu 20.04 FFmpeg 4.2 runs decode, filters and
+encode serially on one thread: on real 3840x2160 IMX415 JPEGs a split adds
+about 3.7 ms/frame to the 4K RTP critical path (26.2 -> 29.9 ms CPU/frame,
+single thread), which leaves no margin at 30 Hz, while the independent
+preview decode costs about 19.4 ms/frame on another core.
+
+A JPEG source that is exactly twice the preview size is decoded with the MJPEG
+decoder's half-resolution IDCT (`-lowres 1`): on the same frames that matches
+an area-average downscale at 51.4 dB luma PSNR / SSIM 0.997 and skips the
+separate scale pass (19.4 vs 23.1 ms/frame). Any other ratio, and raw input,
+is decoded at source size and area-averaged. Output is always exactly
+`video_width` x `video_height` without padding.
+
+Both downscales are edge aligned: source pixel centre `c` maps to preview
+pixel centre `(c + 0.5) * s - 0.5`. A viewer that builds its image plane from
+the source `CameraInfo` width/height and stretches the decoded texture over it
+(Lichtblick ImageMode) stays aligned without a second `CameraInfo`; a consumer
+that needs preview-resolution intrinsics scales `K` with the same rule
+(`f' = f * s`, `c' = (c + 0.5) * s - 0.5`). `test/test_preview_geometry.py`
+projects world markers through a 4K pinhole camera, runs them through the real
+preview command and checks they land within codec noise (< 0.15 px at
+8 Mbit/s) of the scaled-intrinsics projection.
+
+The original ROS Image or CompressedImage timestamp follows each retained
+frame through the bounded input queue; missing source timestamps are
+rejected. The Annex-B stream contains AUD boundaries and repeated parameter
+sets for late joins at the next IDR; its bounded framing reader emits a frame
+when the next AUD arrives (one frame of framing delay) and scans each byte a
+bounded number of times. Decode time is never labelled as capture time. The
+preview requires FFmpeg and zero B-frames; GStreamer keeps its RTP-only path,
+and ROS 2 rejects a configured preview instead of ignoring it.
 
 For JPEG input with NVENC, two bounded encoder output-delay frames allow CPU JPEG
 decode to overlap GPU encoding. Raw input keeps zero output delay. This buffering

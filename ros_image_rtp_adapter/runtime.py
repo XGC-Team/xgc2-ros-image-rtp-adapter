@@ -6,11 +6,12 @@ from collections import deque
 from dataclasses import dataclass
 import threading
 import time
-from typing import Callable, Deque, Dict, Optional, Tuple
+from typing import Callable, Deque, Dict, List, Optional, Tuple
 
 from ros_image_rtp_adapter.control_socket import SourceControlServer, SourceDescription
 from ros_image_rtp_adapter.encoder import (
-    SubprocessRtpEncoder,
+    SubprocessEncoder,
+    create_h264_preview_encoder,
     create_rtp_encoder,
 )
 from ros_image_rtp_adapter.frames import (
@@ -23,7 +24,7 @@ from ros_image_rtp_adapter.settings import AdapterSettings
 
 
 LogFunction = Callable[[str], None]
-EncoderFactory = Callable[..., SubprocessRtpEncoder]
+EncoderFactory = Callable[..., SubprocessEncoder]
 
 
 @dataclass(frozen=True)
@@ -34,8 +35,36 @@ class _QueuedFrame:
     raw_snapshot: Optional[RawFrame] = None
 
 
+class _EncoderChannel:
+    """One consumer-scoped encoder with its own latest-frame queue and pump.
+
+    Media Edge (RTP) and ROS preview subscribers hold separate channels, so a
+    consumer joining or leaving never restarts or throttles the other output.
+    """
+
+    def __init__(self, name: str, encoder: SubprocessEncoder, depth: int, timestamped: bool) -> None:
+        self.name = name
+        self.encoder = encoder
+        self.timestamped = timestamped
+        self.pending: Deque[_QueuedFrame] = deque(maxlen=depth)
+        self.active = False
+        self.frames_out = 0
+        self.frames_dropped = 0
+        # Serializes consumer set-active requests for this channel.
+        self.transition_lock = threading.Lock()
+        # Serializes this encoder's start against its own pump writes.
+        self.lock = threading.Lock()
+        self.thread: Optional[threading.Thread] = None
+
+    def write(self, frame: _QueuedFrame) -> None:
+        if self.timestamped:
+            self.encoder.write_frame(frame.encoder_data, frame.source_stamp_ns)
+        else:
+            self.encoder.write_frame(frame.encoder_data)
+
+
 class ImageRtpAdapterRuntime:
-    """Own one encoder, source-control socket, and bounded frame queue."""
+    """Own the RTP encoder, the optional ROS preview encoder, and the control socket."""
 
     def __init__(
         self,
@@ -45,36 +74,36 @@ class ImageRtpAdapterRuntime:
         log_warning: Optional[LogFunction] = None,
         log_error: Optional[LogFunction] = None,
         encoder_factory: EncoderFactory = create_rtp_encoder,
+        preview_encoder_factory: EncoderFactory = create_h264_preview_encoder,
         on_access_unit: Optional[Callable[[bytes, int], None]] = None,
     ) -> None:
         self.settings = settings
         self._log_info = log_info or (lambda _message: None)
         self._log_warning = log_warning or (lambda _message: None)
         self._log_error = log_error or (lambda _message: None)
+        depth = 1 if settings.drop_to_latest else 32
         self._encoder = encoder_factory(
             backend=settings.encoder_backend,
             **settings.encoder_kwargs(),
         )
-        self._on_access_unit = on_access_unit
+        self._rtp = _EncoderChannel("rtp", self._encoder, depth, timestamped=False)
+        self._video: Optional[_EncoderChannel] = None
         if on_access_unit is not None:
-            self._encoder.set_access_unit_callback(on_access_unit)
-        self._consumer_lock = threading.Lock()
-        self._edge_active = False
-        self._video_active = False
+            video_encoder = preview_encoder_factory(
+                backend=settings.encoder_backend,
+                **settings.video_encoder_kwargs(),
+            )
+            video_encoder.set_access_unit_callback(on_access_unit)
+            self._video = _EncoderChannel("ros-preview", video_encoder, depth, timestamped=True)
+        self._channels = tuple(
+            channel for channel in (self._rtp, self._video) if channel is not None
+        )
         self._lock = threading.Lock()
         self._frame_condition = threading.Condition(self._lock)
-        self._encoder_lock = threading.Lock()
-        self._pending: Deque[_QueuedFrame] = deque(
-            maxlen=1 if settings.drop_to_latest else 32
-        )
         self._latest: Optional[_QueuedFrame] = None
-        self._active = False
         self._started = False
         self._pump_stop = threading.Event()
-        self._pump_thread: Optional[threading.Thread] = None
         self._frames_in = 0
-        self._frames_out = 0
-        self._frames_dropped = 0
         self._last_validation_warning = 0.0
         description = SourceDescription(
             source_id=settings.source_id,
@@ -104,90 +133,100 @@ class ImageRtpAdapterRuntime:
         )
 
     @property
-    def encoder(self) -> SubprocessRtpEncoder:
+    def encoder(self) -> SubprocessEncoder:
         return self._encoder
+
+    @property
+    def video_encoder(self) -> Optional[SubprocessEncoder]:
+        return self._video.encoder if self._video is not None else None
 
     def start(self) -> None:
         if self._started:
             return
         # Fail Session readiness immediately for a missing binary, element, or
-        # configured property, while leaving the actual encoder unallocated
-        # until Edge supplies the first consumer.
-        self._encoder.preflight()
+        # configured property, while leaving the actual encoders unallocated
+        # until a consumer (Edge or a ROS subscriber) appears.
+        for channel in self._channels:
+            channel.encoder.preflight()
         self._pump_stop.clear()
-        thread = threading.Thread(
-            target=self._run_encoder_pump,
-            name="image-rtp-encoder-pump",
-            daemon=True,
-        )
-        self._pump_thread = thread
         self._started = True
         try:
-            thread.start()
+            for channel in self._channels:
+                thread = threading.Thread(
+                    target=self._run_channel_pump,
+                    args=(channel,),
+                    name=f"image-{channel.name}-encoder-pump",
+                    daemon=True,
+                )
+                channel.thread = thread
+                thread.start()
             self._control.start()
         except Exception:
             self._started = False
-            self._pump_stop.set()
-            with self._frame_condition:
-                self._frame_condition.notify_all()
-            if thread.is_alive():
-                thread.join(timeout=2.0)
-            self._pump_thread = None
+            self._stop_pumps()
             raise
 
     def stop(self) -> None:
         if not self._started:
             return
         self._started = False
-        self._pump_stop.set()
-        with self._frame_condition:
-            self._frame_condition.notify_all()
         try:
             self._control.stop()
         finally:
-            thread = self._pump_thread
+            self._stop_pumps()
+
+    def _stop_pumps(self) -> None:
+        self._pump_stop.set()
+        with self._frame_condition:
+            self._frame_condition.notify_all()
+        # Stop encoders before joining: terminating a stalled encoder is what
+        # releases a pump blocked in its pipe write.
+        for channel in self._channels:
+            self._deactivate(channel)
+        for channel in self._channels:
+            thread = channel.thread
             if thread is not None and thread is not threading.current_thread():
                 thread.join(timeout=5.0)
-            self._pump_thread = None
-            with self._encoder_lock:
-                with self._lock:
-                    self._active = False
-                    self._pending.clear()
-                self._encoder.stop()
+            channel.thread = None
+
+    def _deactivate(self, channel: _EncoderChannel) -> None:
+        with self._frame_condition:
+            channel.active = False
+            channel.pending.clear()
+        # Stopping never waits for the pump: terminating the process is what
+        # releases a pump blocked in a pipe write to a stalled encoder.
+        channel.encoder.stop()
 
     def set_active(self, active: bool) -> None:
-        with self._consumer_lock:
-            self._edge_active = bool(active)
-            self._set_encoder_active(self._edge_active or self._video_active)
+        """Media Edge demand (WebRTC viewer, recording, or snapshot)."""
+
+        self._set_channel_active(self._rtp, active)
 
     def set_video_active(self, active: bool) -> None:
-        with self._consumer_lock:
-            self._video_active = bool(active)
-            self._set_encoder_active(self._edge_active or self._video_active)
+        """ROS demand for the H264 preview topic."""
 
-    def _set_encoder_active(self, active: bool) -> None:
+        if self._video is not None:
+            self._set_channel_active(self._video, active)
+
+    def _set_channel_active(self, channel: _EncoderChannel, active: bool) -> None:
         desired = bool(active)
-        with self._encoder_lock:
-            with self._lock:
-                if desired == self._active:
+        with channel.transition_lock:
+            with self._frame_condition:
+                if desired == channel.active:
                     return
-                self._active = desired
-                if not desired:
-                    self._pending.clear()
-            try:
-                if desired:
-                    self._encoder.start()
+            if desired:
+                with channel.lock:
+                    try:
+                        channel.encoder.start()
+                    except Exception:
+                        channel.encoder.stop()
+                        raise
                     with self._frame_condition:
+                        channel.active = True
                         self._frame_condition.notify_all()
-                else:
-                    self._encoder.stop()
-            except Exception:
-                with self._lock:
-                    self._active = False
-                    self._pending.clear()
-                self._encoder.stop()
-                raise
-        self._log_info(f"set-active -> {desired}")
+            else:
+                self._deactivate(channel)
+        self._log_info(f"{channel.name} set-active -> {desired}")
 
     def submit_compressed(self, data: bytes, image_format: str, *, source_stamp_ns: Optional[int] = None) -> bool:
         if self.settings.input_message_type != "compressed":
@@ -246,52 +285,54 @@ class ImageRtpAdapterRuntime:
         return self._enqueue(_QueuedFrame(encoder_data=raw.data, raw_snapshot=raw, source_stamp_ns=source_stamp_ns))
 
     def _enqueue(self, frame: _QueuedFrame) -> bool:
-        if self._on_access_unit and (frame.source_stamp_ns is None or frame.source_stamp_ns <= 0):
+        if self._video is not None and (frame.source_stamp_ns is None or frame.source_stamp_ns <= 0):
             self._warn_validation("H264 preview requires a valid source image timestamp")
             return False
         with self._frame_condition:
             self._latest = frame
             self._frames_in += 1
+            for channel in self._channels:
+                if not channel.active:
+                    continue
+                if len(channel.pending) == channel.pending.maxlen:
+                    channel.frames_dropped += 1
+                channel.pending.append(frame)
             self._frame_condition.notify_all()
-            if not self._active:
-                return True
-            if len(self._pending) == self._pending.maxlen:
-                self._frames_dropped += 1
-            self._pending.append(frame)
         return True
 
     def pump(self) -> bool:
-        with self._encoder_lock:
+        """Deliver at most one queued frame to every active encoder."""
+
+        delivered = False
+        for channel in self._channels:
+            delivered = self._pump_channel(channel) or delivered
+        return delivered
+
+    def _pump_channel(self, channel: _EncoderChannel) -> bool:
+        with channel.lock:
             with self._lock:
-                if not self._active or not self._pending:
+                if not channel.active or not channel.pending:
                     return False
-                frame = self._pending.popleft()
-            if self._on_access_unit:
-                self._encoder.write_frame(frame.encoder_data, frame.source_stamp_ns)
-            else:
-                self._encoder.write_frame(frame.encoder_data)
+                frame = channel.pending.popleft()
+            channel.write(frame)
         with self._lock:
-            self._frames_out += 1
+            channel.frames_out += 1
         return True
 
-    def _run_encoder_pump(self) -> None:
+    def _run_channel_pump(self, channel: _EncoderChannel) -> None:
         while not self._pump_stop.is_set():
             with self._frame_condition:
                 self._frame_condition.wait_for(
                     lambda: self._pump_stop.is_set()
-                    or (self._active and bool(self._pending))
+                    or (channel.active and bool(channel.pending))
                 )
                 if self._pump_stop.is_set():
                     return
             try:
-                self.pump()
+                self._pump_channel(channel)
             except Exception as exc:
-                self._log_error(f"encoder frame pump failed: {exc}")
-                with self._encoder_lock:
-                    with self._lock:
-                        self._active = False
-                        self._pending.clear()
-                    self._encoder.stop()
+                self._log_error(f"{channel.name} encoder frame pump failed: {exc}")
+                self._deactivate(channel)
 
     def snapshot_jpeg(self) -> Optional[bytes]:
         jpeg, _rgb = self.snapshot_parts(False) or (None, None)
@@ -344,15 +385,46 @@ class ImageRtpAdapterRuntime:
 
     def status(self) -> Dict[str, object]:
         with self._lock:
-            return {
-                "frames_in": self._frames_in,
-                "frames_out": self._frames_out,
-                "frames_dropped": self._frames_dropped,
-                "active": self._active,
-                "pending": len(self._pending),
-                "encoder_running": self._encoder.running,
-                "encoder_diagnostic": self._encoder.diagnostic,
-            }
+            status: Dict[str, object] = {"frames_in": self._frames_in}
+            for channel in self._channels:
+                status[channel.name] = {
+                    "active": channel.active,
+                    "frames_out": channel.frames_out,
+                    "frames_dropped": channel.frames_dropped,
+                    "pending": len(channel.pending),
+                }
+        for channel in self._channels:
+            entry = status[channel.name]
+            entry["encoder_running"] = channel.encoder.running
+            entry["encoder_diagnostic"] = channel.encoder.diagnostic
+        return status
+
+    def status_report(self) -> List[Tuple[str, str]]:
+        """ROS-neutral ``(level, message)`` status lines, one per encoder."""
+
+        status = self.status()
+        reports: List[Tuple[str, str]] = []
+        for channel in self._channels:
+            entry = status[channel.name]
+            if not entry["active"]:
+                reports.append(("info", (
+                    f"{channel.name} idle source_id={self.settings.source_id} "
+                    f"frames_in={status['frames_in']} "
+                    f"encoder_released={not entry['encoder_running']}"
+                )))
+            elif not entry["encoder_running"]:
+                reports.append(("error", (
+                    f"{channel.name} encoder backend={self.settings.encoder_backend} "
+                    f"is not running: {entry['encoder_diagnostic'] or 'no diagnostic'}"
+                )))
+            else:
+                reports.append(("info", (
+                    f"{channel.name} frames_in={status['frames_in']} "
+                    f"frames_out={entry['frames_out']} frames_dropped={entry['frames_dropped']} "
+                    f"pending={entry['pending']} topic={self.settings.image_topic} "
+                    f"backend={self.settings.encoder_backend}"
+                )))
+        return reports
 
     def _warn_validation(self, message: str) -> None:
         now = time.monotonic()

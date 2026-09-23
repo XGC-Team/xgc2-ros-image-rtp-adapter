@@ -223,7 +223,10 @@ docker run --rm \
       /workspace/work/source/test/test_control_socket.py \
       /workspace/work/source/test/test_encoder.py \
       /workspace/work/source/test/test_frames.py \
+      /workspace/work/source/test/test_h264.py \
+      /workspace/work/source/test/test_h264_integration.py \
       /workspace/work/source/test/test_media_edge_source_roster.py \
+      /workspace/work/source/test/test_preview_geometry.py \
       /workspace/work/source/test/test_runtime.py -q
     PYTHONPATH=/workspace/work/source \
       python3 /workspace/work/source/scripts/integration_gstreamer_rtp.py

@@ -104,17 +104,21 @@ def packed_frame_bytes(input_format: str, width: int, height: int) -> int:
     return int(width) * int(height) * _RAW_INPUTS[normalized][2]
 
 
-class SubprocessRtpEncoder:
-    """Common supervised stdin/subprocess lifecycle for encoder backends."""
+class SubprocessEncoder:
+    """Supervised stdin-fed encoder subprocess.
+
+    ``_state_lock`` only guards the process handle. Writers serialize on
+    ``_write_lock`` and never hold ``_state_lock`` while blocked in a pipe
+    write, so ``stop()`` can always terminate a stalled encoder (which also
+    unblocks the writer) instead of waiting behind it.
+    """
 
     def __init__(self) -> None:
         self._proc: Optional[subprocess.Popen] = None
-        self._lock = threading.Lock()
+        self._state_lock = threading.Lock()
+        self._write_lock = threading.Lock()
         self._runtime_validated = False
         self._stderr_tail = deque(maxlen=20)
-        self._access_unit_callback = None
-        self._source_stamps = deque()
-        self._metadata_lock = threading.Lock()
 
     @property
     def running(self) -> bool:
@@ -126,7 +130,7 @@ class SubprocessRtpEncoder:
         return "\n".join(self._stderr_tail)
 
     def start(self) -> None:
-        with self._lock:
+        with self._state_lock:
             if self._proc is not None:
                 return
             self._launch_locked()
@@ -134,37 +138,24 @@ class SubprocessRtpEncoder:
     def preflight(self) -> None:
         """Validate the configured backend without allocating an encoder."""
 
-        with self._lock:
+        with self._state_lock:
             if self._runtime_validated:
                 return
             self.validate_runtime()
             self._runtime_validated = True
 
     def stop(self) -> None:
-        with self._lock:
+        with self._state_lock:
             proc = self._proc
             self._proc = None
         self._stop_process(proc)
 
-    def set_access_unit_callback(self, callback: Callable[[bytes, int], None]) -> None:
-        if not isinstance(self, FFmpegRtpEncoder):
-            raise ValueError("ROS H264 preview requires the FFmpeg encoder backend")
-        if self._proc is not None:
-            raise RuntimeError("configure H264 preview before starting the encoder")
-        self._access_unit_callback = callback
-
     def write_frame(self, frame: bytes, source_stamp_ns: Optional[int] = None) -> None:
-        with self._lock:
+        with self._write_lock:
             proc = self._proc
             if proc is None or proc.stdin is None:
                 return
-            if self._access_unit_callback is not None:
-                if source_stamp_ns is None or source_stamp_ns <= 0:
-                    raise ValueError("H264 preview requires the source image timestamp")
-                with self._metadata_lock:
-                    if len(self._source_stamps) >= 64:
-                        raise RuntimeError("H264 encoder output stalled")
-                    self._source_stamps.append(source_stamp_ns)
+            self._before_write(source_stamp_ns)
             try:
                 remaining = memoryview(frame)
                 while remaining:
@@ -173,8 +164,15 @@ class SubprocessRtpEncoder:
                         raise BrokenPipeError("encoder input pipe stopped accepting data")
                     remaining = remaining[written:]
                 proc.stdin.flush()
-            except (BrokenPipeError, OSError):
-                self._restart_locked()
+            except (BrokenPipeError, OSError, ValueError):
+                # ValueError: stop() closed stdin while this write was blocked.
+                with self._state_lock:
+                    # Only a crashed *current* encoder restarts; a stopped one stays stopped.
+                    if self._proc is proc:
+                        self._restart_locked()
+
+    def _before_write(self, source_stamp_ns: Optional[int]) -> None:
+        """Hook run under the write lock before a frame reaches the live process."""
 
     def request_keyframe(self) -> None:
         # Stdin-driven command-line encoders expose no portable live force-IDR
@@ -188,6 +186,15 @@ class SubprocessRtpEncoder:
     def _build_command(self) -> List[str]:
         raise NotImplementedError
 
+    def _stdout_target(self) -> int:
+        return subprocess.DEVNULL
+
+    def _before_launch(self) -> None:
+        """Hook run before a new process becomes visible to writers."""
+
+    def _on_launched(self, proc: subprocess.Popen) -> None:
+        """Hook run once ``proc`` is the current process (output readers)."""
+
     def _launch_locked(self) -> None:
         if not self._runtime_validated:
             self.validate_runtime()
@@ -195,17 +202,14 @@ class SubprocessRtpEncoder:
         proc = subprocess.Popen(
             self._build_command(),
             stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE if self._access_unit_callback else subprocess.DEVNULL,
+            stdout=self._stdout_target(),
             stderr=subprocess.PIPE,
             bufsize=0,
         )
-        with self._metadata_lock:
-            self._source_stamps.clear()
-            self._proc = proc
         self._stderr_tail.clear()
-        if self._access_unit_callback:
-            threading.Thread(target=self._drain_access_units, args=(proc,), daemon=True,
-                             name="h264-preview-output").start()
+        self._before_launch()
+        self._proc = proc
+        self._on_launched(proc)
         threading.Thread(target=self._drain_stderr, args=(proc,), daemon=True).start()
 
     def _restart_locked(self) -> None:
@@ -221,7 +225,7 @@ class SubprocessRtpEncoder:
         try:
             if proc.stdin:
                 proc.stdin.close()
-        except OSError:
+        except (OSError, ValueError):
             pass
         if proc.poll() is None:
             try:
@@ -244,30 +248,6 @@ class SubprocessRtpEncoder:
         except (OSError, subprocess.TimeoutExpired):
             pass
 
-    def _drain_access_units(self, proc: subprocess.Popen) -> None:
-        parser = AnnexBAccessUnits()
-        def emit(unit):
-            with self._metadata_lock:
-                if self._proc is not proc:
-                    return
-                if not self._source_stamps:
-                    raise RuntimeError("H264 output has no matching source timestamp")
-                stamp = self._source_stamps.popleft()
-            self._access_unit_callback(unit, stamp)
-        try:
-            while self._proc is proc:
-                data = proc.stdout.read(65536)
-                if not data:
-                    break
-                for unit in parser.feed(data):
-                    emit(unit)
-            for unit in parser.finish():
-                emit(unit)
-        except Exception as exc:
-            self._stderr_tail.append(f"H264 preview output failed: {exc}")
-            if proc.poll() is None:
-                proc.kill()
-
     def _drain_stderr(self, proc: subprocess.Popen) -> None:
         if proc.stderr is None:
             return
@@ -278,8 +258,95 @@ class SubprocessRtpEncoder:
             pass
 
 
-class FFmpegRtpEncoder(SubprocessRtpEncoder):
-    """Portable FFmpeg backend; defaults to low-latency software x264."""
+def _ffmpeg_validate_encoder(ffmpeg_path: str, encoder: str) -> None:
+    try:
+        result = subprocess.run(
+            [ffmpeg_path, "-hide_banner", "-loglevel", "error", "-h", f"encoder={encoder}"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError(f"FFmpeg preflight failed: {exc}") from exc
+    output = result.stdout.decode("utf-8", errors="replace")
+    if result.returncode != 0 or "not recognized" in output.lower():
+        raise RuntimeError(f"FFmpeg encoder {encoder!r} is unavailable: {output.strip()}")
+
+
+def _ffmpeg_input_arguments(
+    input_format: str, width: int, height: int, fps: float
+) -> List[str]:
+    """Input-side arguments for complete JPEG frames or packed raw frames."""
+
+    if input_format == "jpeg":
+        # image2pipe + mjpeg accepts concatenated complete JPEG frames.
+        return ["-f", "image2pipe", "-vcodec", "mjpeg", "-framerate", str(fps), "-i", "pipe:0"]
+    pixel_format = _RAW_INPUTS[input_format][0]
+    return [
+        "-f", "rawvideo", "-pixel_format", pixel_format,
+        "-video_size", f"{width}x{height}", "-framerate", str(fps), "-i", "pipe:0",
+    ]
+
+
+def _ffmpeg_codec_arguments(
+    *,
+    encoder: str,
+    encoder_args: Sequence[str],
+    bitrate: int,
+    fps: float,
+    width: int,
+    height: int,
+    input_format: str,
+) -> List[str]:
+    """Codec options shared by the RTP and ROS preview outputs."""
+
+    gop = max(1, int(round(fps)))
+    if encoder_args:
+        context = {
+            "@bitrate": str(bitrate),
+            "@bitrate_kbps": str(max(1, int(round(bitrate / 1000.0)))),
+            "@fps": _format_number(fps),
+            "@gop": str(gop),
+            "@width": str(width),
+            "@height": str(height),
+        }
+        return [context.get(argument, argument) for argument in encoder_args]
+    if encoder == "libx264":
+        return [
+            "-preset", "veryfast", "-tune", "zerolatency", "-pix_fmt", "yuv420p",
+            "-g", str(gop), "-keyint_min", str(gop), "-bf", "0",
+            "-b:v", str(bitrate), "-maxrate", str(bitrate), "-bufsize", str(bitrate * 2),
+            "-x264-params", "repeat-headers=1:scenecut=0",
+        ]
+    if encoder == "h264_nvenc":
+        # Bound the access-unit burst before sizing the loopback RTP receive
+        # queue. A nominal average bitrate alone is not a bound: motion or a
+        # scene cut can otherwise create an arbitrarily larger short burst even
+        # while a static camera appears to sustain 30 Hz.
+        return [
+            "-preset", "llhq", "-profile:v", "high", "-pix_fmt", "yuv420p",
+            "-rc", "cbr_ld_hq", "-zerolatency", "1",
+            "-delay",
+            # MJPEG CPU decode and NVENC can overlap across bounded surfaces.
+            # Zero serializes both stages on each frame (4K falls below 30 Hz).
+            "2" if input_format == "jpeg" else "0",
+            "-rc-lookahead", "0", "-bf", "0",
+            "-g", str(gop), "-keyint_min", str(gop),
+            "-no-scenecut", "1", "-strict_gop", "1", "-forced-idr", "1",
+            "-b:v", str(bitrate), "-maxrate", str(bitrate), "-bufsize", str(bitrate),
+        ]
+    # Minimal codec-level defaults. Hardware-specific flags belong in
+    # ffmpeg_encoder_args_json so no vendor assumptions leak here.
+    return ["-b:v", str(bitrate), "-g", str(gop)]
+
+
+class FFmpegRtpEncoder(SubprocessEncoder):
+    """Portable FFmpeg RTP backend; defaults to low-latency software x264.
+
+    This is the Media Edge (WebRTC/snapshot/recording) output only. It keeps
+    the configured source geometry; the ROS preview is a separate encoder.
+    """
 
     def __init__(
         self,
@@ -310,181 +377,170 @@ class FFmpegRtpEncoder(SubprocessRtpEncoder):
         self._video_filter = video_filter
 
     def validate_runtime(self) -> None:
-        try:
-            result = subprocess.run(
-                [
-                    self._ffmpeg_path,
-                    "-hide_banner",
-                    "-loglevel",
-                    "error",
-                    "-h",
-                    f"encoder={self._encoder}",
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                check=False,
-                timeout=10,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise RuntimeError(f"FFmpeg preflight failed: {exc}") from exc
-        output = result.stdout.decode("utf-8", errors="replace")
-        if result.returncode != 0 or "not recognized" in output.lower():
-            raise RuntimeError(
-                f"FFmpeg encoder {self._encoder!r} is unavailable: {output.strip()}"
-            )
+        _ffmpeg_validate_encoder(self._ffmpeg_path, self._encoder)
 
     def _build_command(self) -> List[str]:
-        gop = max(1, int(round(self._fps)))
         video_filter = self._video_filter or (
             f"scale={self._width}:{self._height}:force_original_aspect_ratio=decrease,"
             f"pad={self._width}:{self._height}:(ow-iw)/2:(oh-ih)/2"
         )
         command = [
-            self._ffmpeg_path,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-fflags",
-            "+genpts" if self._access_unit_callback else "nobuffer",
-            "-flags",
-            "low_delay",
+            self._ffmpeg_path, "-hide_banner", "-loglevel", "error",
+            "-fflags", "nobuffer", "-flags", "low_delay",
+            # The first frame carries every stream parameter; default probing
+            # would hold back the first IDR for a newly joining viewer.
+            "-probesize", "32", "-analyzeduration", "0",
         ]
-        if self._access_unit_callback:
-            command.extend(["-probesize", "32", "-analyzeduration", "0", "-threads", "1"])
-        if self._input_format == "jpeg":
-            # image2pipe + mjpeg accepts concatenated complete JPEG frames.
-            command.extend(
-                [
-                    "-f",
-                    "image2pipe",
-                    "-vcodec",
-                    "mjpeg",
-                    "-framerate",
-                    str(self._fps),
-                    "-i",
-                    "pipe:0",
-                ]
-            )
-        else:
-            pixel_format = _RAW_INPUTS[self._input_format][0]
-            command.extend(
-                [
-                    "-f",
-                    "rawvideo",
-                    "-pixel_format",
-                    pixel_format,
-                    "-video_size",
-                    f"{self._width}x{self._height}",
-                    "-framerate",
-                    str(self._fps),
-                    "-i",
-                    "pipe:0",
-                ]
-            )
+        command.extend(_ffmpeg_input_arguments(self._input_format, self._width, self._height, self._fps))
         command.extend(["-an", "-vf", video_filter, "-c:v", self._encoder])
-
-        if self._encoder_args:
-            command.extend(self._expand_arguments(self._encoder_args, gop))
-        elif self._encoder == "libx264":
-            command.extend(
-                [
-                    "-preset",
-                    "veryfast",
-                    "-tune",
-                    "zerolatency",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-g",
-                    str(gop),
-                    "-keyint_min",
-                    str(gop),
-                    "-bf",
-                    "0",
-                    "-b:v",
-                    str(self._bitrate),
-                    "-maxrate",
-                    str(self._bitrate),
-                    "-bufsize",
-                    str(self._bitrate * 2),
-                    "-x264-params",
-                    "repeat-headers=1:scenecut=0",
-                ]
-            )
-        elif self._encoder == "h264_nvenc":
-            # Bound the access-unit burst before sizing the loopback RTP
-            # receive queue. A nominal average bitrate alone is not a bound:
-            # motion or a scene cut can otherwise create an arbitrarily larger
-            # short burst even while a static camera appears to sustain 30 Hz.
-            command.extend(
-                [
-                    "-preset",
-                    "llhq",
-                    "-profile:v",
-                    "high",
-                    "-pix_fmt",
-                    "yuv420p",
-                    "-rc",
-                    "cbr_ld_hq",
-                    "-zerolatency",
-                    "1",
-                    "-delay",
-                    # MJPEG CPU decode and NVENC can overlap across bounded surfaces.
-                    # Zero serializes both stages on each frame (4K falls below 30 Hz).
-                    "2" if self._input_format == "jpeg" else "0",
-                    "-rc-lookahead",
-                    "0",
-                    "-bf",
-                    "0",
-                    "-g",
-                    str(gop),
-                    "-keyint_min",
-                    str(gop),
-                    "-no-scenecut",
-                    "1",
-                    "-strict_gop",
-                    "1",
-                    "-forced-idr",
-                    "1",
-                    "-b:v",
-                    str(self._bitrate),
-                    "-maxrate",
-                    str(self._bitrate),
-                    "-bufsize",
-                    str(self._bitrate),
-                ]
-            )
-        else:
-            # Minimal codec-level defaults. Hardware-specific flags belong in
-            # ffmpeg_encoder_args_json so no vendor assumptions leak here.
-            command.extend(["-b:v", str(self._bitrate), "-g", str(gop)])
-
-        if self._access_unit_callback:
-            command.extend([
-                "-xerror", "-vsync", "0", "-bf", "0", "-map", "0:v:0",
-                "-bsf:v", "dump_extra=freq=keyframe,h264_metadata=aud=insert",
-                "-f", "tee",
-                f"[f=rtp:payload_type=96]rtp://{self._rtp_host}:{self._rtp_port}?pkt_size=1200|[f=h264:flush_packets=1]pipe:1",
-            ])
-        else:
-            command.extend([
-                "-f", "rtp", "-payload_type", "96",
-                f"rtp://{self._rtp_host}:{self._rtp_port}?pkt_size=1200",
-            ])
+        command.extend(_ffmpeg_codec_arguments(
+            encoder=self._encoder, encoder_args=self._encoder_args, bitrate=self._bitrate,
+            fps=self._fps, width=self._width, height=self._height, input_format=self._input_format,
+        ))
+        command.extend([
+            "-f", "rtp", "-payload_type", "96",
+            f"rtp://{self._rtp_host}:{self._rtp_port}?pkt_size=1200",
+        ])
         return command
 
-    def _expand_arguments(self, arguments: Sequence[str], gop: int) -> List[str]:
-        context = {
-            "@bitrate": str(self._bitrate),
-            "@bitrate_kbps": str(max(1, int(round(self._bitrate / 1000.0)))),
-            "@fps": _format_number(self._fps),
-            "@gop": str(gop),
-            "@width": str(self._width),
-            "@height": str(self._height),
-        }
-        return [context.get(argument, argument) for argument in arguments]
+
+class FFmpegH264PreviewEncoder(SubprocessEncoder):
+    """ROS ``CompressedVideo`` preview output with its own geometry and budget.
+
+    It runs only while ROS subscribers exist and never touches RTP, so the
+    Media Edge stream and the preview start, stop and fail independently. A
+    JPEG source that is exactly twice the preview size is decoded with the
+    MJPEG decoder's half-resolution IDCT (``-lowres 1``); any other ratio is
+    decoded at full size and area-averaged. Both are edge-aligned downscales
+    (preview pixel centre ``c' = (c + 0.5) * s - 0.5``), so a CameraInfo for
+    the source still maps the full preview texture onto the same image plane.
+    """
+
+    def __init__(
+        self,
+        *,
+        ffmpeg_path: str,
+        source_width: int,
+        source_height: int,
+        width: int,
+        height: int,
+        fps: float,
+        bitrate: int,
+        input_format: str = "jpeg",
+        encoder: str = "libx264",
+        encoder_args: ArgumentInput = "[]",
+    ) -> None:
+        super().__init__()
+        self._ffmpeg_path = ffmpeg_path
+        self._source_width = int(source_width)
+        self._source_height = int(source_height)
+        self._width = int(width)
+        self._height = int(height)
+        self._fps = float(fps)
+        self._bitrate = int(bitrate)
+        self._input_format = normalize_input_format(input_format)
+        self._encoder = encoder
+        self._encoder_args = _parse_arguments(encoder_args, "ffmpeg_encoder_args_json")
+        self._access_unit_callback: Optional[Callable[[bytes, int], None]] = None
+        self._source_stamps: deque = deque()
+        self._metadata_lock = threading.Lock()
+
+    @property
+    def half_resolution_decode(self) -> bool:
+        return (
+            self._input_format == "jpeg"
+            and self._source_width == 2 * self._width
+            and self._source_height == 2 * self._height
+        )
+
+    def set_access_unit_callback(self, callback: Callable[[bytes, int], None]) -> None:
+        if self._proc is not None:
+            raise RuntimeError("configure H264 preview before starting the encoder")
+        self._access_unit_callback = callback
+
+    def validate_runtime(self) -> None:
+        _ffmpeg_validate_encoder(self._ffmpeg_path, self._encoder)
+
+    def write_frame(self, frame: bytes, source_stamp_ns: Optional[int] = None) -> None:
+        if source_stamp_ns is None or source_stamp_ns <= 0:
+            raise ValueError("H264 preview requires the source image timestamp")
+        super().write_frame(frame, source_stamp_ns)
+
+    def _before_write(self, source_stamp_ns: Optional[int]) -> None:
+        with self._metadata_lock:
+            if len(self._source_stamps) >= 64:
+                raise RuntimeError("H264 encoder output stalled")
+            self._source_stamps.append(source_stamp_ns)
+
+    def _stdout_target(self) -> int:
+        return subprocess.PIPE
+
+    def _before_launch(self) -> None:
+        with self._metadata_lock:
+            self._source_stamps.clear()
+
+    def _on_launched(self, proc: subprocess.Popen) -> None:
+        threading.Thread(target=self._drain_access_units, args=(proc,), daemon=True,
+                         name="h264-preview-output").start()
+
+    def _build_command(self) -> List[str]:
+        command = [
+            self._ffmpeg_path, "-hide_banner", "-loglevel", "error",
+            "-fflags", "+genpts", "-flags", "low_delay",
+            "-probesize", "32", "-analyzeduration", "0", "-threads", "1",
+        ]
+        if self.half_resolution_decode:
+            command.extend(["-lowres", "1"])
+        command.extend(_ffmpeg_input_arguments(
+            self._input_format, self._source_width, self._source_height, self._fps,
+        ))
+        # Exact output geometry, never padding: letterbox bars would shift the
+        # image inside the CameraInfo plane that Lichtblick maps the texture to.
+        command.extend([
+            "-an", "-vf", f"scale={self._width}:{self._height}:flags=area",
+            "-c:v", self._encoder,
+        ])
+        command.extend(_ffmpeg_codec_arguments(
+            encoder=self._encoder, encoder_args=self._encoder_args, bitrate=self._bitrate,
+            fps=self._fps, width=self._width, height=self._height, input_format=self._input_format,
+        ))
+        command.extend([
+            "-xerror", "-vsync", "0", "-bf", "0", "-map", "0:v:0",
+            "-bsf:v", "dump_extra=freq=keyframe,h264_metadata=aud=insert",
+            "-flush_packets", "1", "-f", "h264", "pipe:1",
+        ])
+        return command
+
+    def _drain_access_units(self, proc: subprocess.Popen) -> None:
+        parser = AnnexBAccessUnits()
+
+        def emit(unit):
+            with self._metadata_lock:
+                if self._proc is not proc:
+                    return
+                if not self._source_stamps:
+                    raise RuntimeError("H264 output has no matching source timestamp")
+                stamp = self._source_stamps.popleft()
+            callback = self._access_unit_callback
+            if callback is not None:
+                callback(unit, stamp)
+
+        try:
+            while self._proc is proc:
+                data = proc.stdout.read(65536)
+                if not data:
+                    break
+                for unit in parser.feed(data):
+                    emit(unit)
+            for unit in parser.finish():
+                emit(unit)
+        except Exception as exc:
+            self._stderr_tail.append(f"H264 preview output failed: {exc}")
+            if proc.poll() is None:
+                proc.kill()
 
 
-class GStreamerRtpEncoder(SubprocessRtpEncoder):
+class GStreamerRtpEncoder(SubprocessEncoder):
     """Configurable GStreamer backend for software or hardware elements."""
 
     def __init__(
@@ -748,7 +804,7 @@ class GStreamerRtpEncoder(SubprocessRtpEncoder):
         return arguments
 
 
-def create_rtp_encoder(*, backend: str, **kwargs: Any) -> SubprocessRtpEncoder:
+def create_rtp_encoder(*, backend: str, **kwargs: Any) -> SubprocessEncoder:
     """Create a backend without auto-detecting a vendor or device model."""
 
     normalized = backend.strip().lower()
@@ -757,3 +813,11 @@ def create_rtp_encoder(*, backend: str, **kwargs: Any) -> SubprocessRtpEncoder:
     if normalized == "gstreamer":
         return GStreamerRtpEncoder(**kwargs)
     raise ValueError("encoder_backend must be one of: ffmpeg, gstreamer")
+
+
+def create_h264_preview_encoder(*, backend: str, **kwargs: Any) -> FFmpegH264PreviewEncoder:
+    """The timestamped ROS preview needs FFmpeg's encoded-packet output."""
+
+    if backend.strip().lower() != "ffmpeg":
+        raise ValueError("ROS H264 preview requires the FFmpeg encoder backend")
+    return FFmpegH264PreviewEncoder(**kwargs)

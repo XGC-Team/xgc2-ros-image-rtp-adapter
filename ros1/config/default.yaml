@@ -10,6 +10,11 @@ width: 1280
 height: 720
 fps: 15.0
 bitrate: 2500000
+# ROS 1 H264 preview (foxglove_msgs/CompressedVideo); empty disables it.
+video_topic: ""
+video_width: 1280
+video_height: 720
+video_bitrate: 2500000
 encoder_backend: ffmpeg
 encoder: libx264
 ffmpeg_path: ffmpeg

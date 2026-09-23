@@ -23,6 +23,9 @@ class ImageRtpAdapterNode(Node):
             self._settings = AdapterSettings.from_mapping(values)
         except ValueError as exc:
             raise RuntimeError(f"invalid image RTP adapter configuration: {exc}") from exc
+        if self._settings.video_topic:
+            # Fail closed instead of silently ignoring a configured preview.
+            raise RuntimeError("the ROS H264 preview output is implemented for ROS 1 only")
 
         self._runtime = ImageRtpAdapterRuntime(
             self._settings,
@@ -83,39 +86,9 @@ class ImageRtpAdapterNode(Node):
         )
 
     def _log_status(self) -> None:
-        status = self._runtime.status()
-        if not status["active"]:
-            self.get_logger().info(
-                "status idle source_id=%s frames_in=%d encoder_released=%s"
-                % (
-                    self._settings.source_id,
-                    status["frames_in"],
-                    not status["encoder_running"],
-                )
-            )
-            return
-        if not status["encoder_running"]:
-            self.get_logger().error(
-                "encoder backend=%s is not running: %s"
-                % (
-                    self._settings.encoder_backend,
-                    status["encoder_diagnostic"] or "no diagnostic",
-                )
-            )
-            return
-        self.get_logger().info(
-            "status frames_in=%d frames_out=%d frames_dropped=%d "
-            "pending=%d active=%s topic=%s backend=%s"
-            % (
-                status["frames_in"],
-                status["frames_out"],
-                status["frames_dropped"],
-                status["pending"],
-                status["active"],
-                self._settings.image_topic,
-                self._settings.encoder_backend,
-            )
-        )
+        logger = self.get_logger()
+        for level, message in self._runtime.status_report():
+            (logger.error if level == "error" else logger.info)("status " + message)
 
 
 def main(args=None) -> None:

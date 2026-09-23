@@ -23,6 +23,13 @@ PARAMETER_DEFAULTS: Dict[str, Any] = {
     "height": 720,
     "fps": 15.0,
     "bitrate": 2_500_000,
+    # Optional ROS 1 foxglove_msgs/CompressedVideo preview output. It is only
+    # encoded while ROS subscribers exist, with its own geometry and budget
+    # (defaults match the generic RTP example).
+    "video_topic": "",
+    "video_width": 1280,
+    "video_height": 720,
+    "video_bitrate": 2_500_000,
     "encoder_backend": "ffmpeg",
     "encoder": "libx264",
     "ffmpeg_path": "ffmpeg",
@@ -68,6 +75,10 @@ class AdapterSettings:
     height: int
     fps: float
     bitrate: int
+    video_topic: str
+    video_width: int
+    video_height: int
+    video_bitrate: int
     encoder_backend: str
     encoder: str
     ffmpeg_path: str
@@ -105,6 +116,10 @@ class AdapterSettings:
             height=int(merged["height"]),
             fps=float(merged["fps"]),
             bitrate=int(merged["bitrate"]),
+            video_topic=str(merged["video_topic"]).strip(),
+            video_width=int(merged["video_width"]),
+            video_height=int(merged["video_height"]),
+            video_bitrate=int(merged["video_bitrate"]),
             encoder_backend=str(merged["encoder_backend"]).strip().lower(),
             encoder=str(merged["encoder"]).strip(),
             ffmpeg_path=str(merged["ffmpeg_path"]).strip(),
@@ -168,6 +183,22 @@ class AdapterSettings:
             raise ValueError("bitrate must be positive")
         if self.encoder_backend not in {"ffmpeg", "gstreamer"}:
             raise ValueError("encoder_backend must be one of: ffmpeg, gstreamer")
+        if self.video_topic:
+            self._validate_video_preview()
+
+    def _validate_video_preview(self) -> None:
+        if self.encoder_backend != "ffmpeg":
+            raise ValueError("ROS H264 preview requires the FFmpeg encoder backend")
+        if self.video_width < 16 or self.video_height < 16:
+            raise ValueError("video_width and video_height must be at least 16")
+        if self.video_width > self.width or self.video_height > self.height:
+            raise ValueError("the ROS H264 preview must not upscale the source geometry")
+        if self.video_width * self.height != self.video_height * self.width:
+            # A non-uniform scale would still map onto CameraInfo, but the
+            # preview contract is one isotropic edge-aligned downscale.
+            raise ValueError("the ROS H264 preview must keep the source aspect ratio")
+        if self.video_bitrate < 1:
+            raise ValueError("video_bitrate must be positive")
 
     def encoder_kwargs(self) -> Dict[str, Any]:
         common = {
@@ -206,3 +237,19 @@ class AdapterSettings:
                 }
             )
         return common
+
+    def video_encoder_kwargs(self) -> Dict[str, Any]:
+        """ROS preview encoder: source geometry in, preview geometry out."""
+
+        return {
+            "ffmpeg_path": self.ffmpeg_path,
+            "encoder": self.encoder,
+            "encoder_args": self.ffmpeg_encoder_args_json,
+            "source_width": self.width,
+            "source_height": self.height,
+            "width": self.video_width,
+            "height": self.video_height,
+            "fps": self.fps,
+            "bitrate": self.video_bitrate,
+            "input_format": self.encoder_input_format,
+        }

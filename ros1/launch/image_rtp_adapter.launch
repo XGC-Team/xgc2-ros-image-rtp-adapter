@@ -11,6 +11,10 @@
   <arg name="height" default="720" />
   <arg name="fps" default="15.0" />
   <arg name="bitrate" default="2500000" />
+  <arg name="video_topic" default="" />
+  <arg name="video_width" default="1280" />
+  <arg name="video_height" default="720" />
+  <arg name="video_bitrate" default="2500000" />
   <arg name="encoder_backend" default="ffmpeg" />
 
   <node pkg="ros_image_rtp_adapter" type="image_rtp_adapter"
@@ -27,6 +31,10 @@
     <param name="height" value="$(arg height)" />
     <param name="fps" value="$(arg fps)" />
     <param name="bitrate" value="$(arg bitrate)" />
+    <param name="video_topic" value="$(arg video_topic)" />
+    <param name="video_width" value="$(arg video_width)" />
+    <param name="video_height" value="$(arg video_height)" />
+    <param name="video_bitrate" value="$(arg video_bitrate)" />
     <param name="encoder_backend" value="$(arg encoder_backend)" />
   </node>
 </launch>

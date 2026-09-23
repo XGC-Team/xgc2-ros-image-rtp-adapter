@@ -8,35 +8,40 @@ import threading
 
 import pytest
 
-from ros_image_rtp_adapter.encoder import FFmpegRtpEncoder
+from ros_image_rtp_adapter.encoder import FFmpegH264PreviewEncoder
 
 
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="FFmpeg is not installed")
 @pytest.mark.parametrize("encoder_name", ["libx264", pytest.param("h264_nvenc", marks=pytest.mark.skipif(
     os.environ.get("XGC2_TEST_NVENC") != "1", reason="NVENC hardware test is opt-in"))])
 @pytest.mark.parametrize("input_format", ["jpeg", "rgb8"])
-def test_h264_source_timestamps_match_decoded_pixels_and_late_join(input_format, encoder_name):
+@pytest.mark.parametrize("source_size", [(512, 288), (384, 216)], ids=["half", "area"])
+def test_h264_source_timestamps_match_decoded_pixels_and_late_join(
+    input_format, encoder_name, source_size,
+):
     Image = pytest.importorskip("PIL.Image")
     units = []
     complete = threading.Event()
     # NVENC also exercises this fixture; tiny 128x72 surfaces are unsupported.
     count, width, height = 36, 256, 144
+    source_width, source_height = source_size
 
     def receive(data, stamp):
         units.append((data, stamp))
         if len(units) == count:
             complete.set()
 
-    encoder = FFmpegRtpEncoder(
-        ffmpeg_path="ffmpeg", rtp_host="127.0.0.1", rtp_port=59994,
+    encoder = FFmpegH264PreviewEncoder(
+        ffmpeg_path="ffmpeg", source_width=source_width, source_height=source_height,
         width=width, height=height, fps=15, bitrate=1_000_000,
         input_format=input_format, encoder=encoder_name,
     )
+    assert encoder.half_resolution_decode == (input_format == "jpeg" and source_size == (512, 288))
     encoder.set_access_unit_callback(receive)
     encoder.start()
     try:
         for index in range(count):
-            frame = Image.new("RGB", (width, height), (30 + index * 5,) * 3)
+            frame = Image.new("RGB", (source_width, source_height), (30 + index * 5,) * 3)
             if input_format == "jpeg":
                 buffer = BytesIO()
                 frame.save(buffer, format="JPEG")
@@ -65,7 +70,7 @@ def test_h264_source_timestamps_match_decoded_pixels_and_late_join(input_format,
                 "-pix_fmt", "rgb24", "-vsync", "0", "pipe:1",
             ], input=b"".join(unit for unit, _ in units[start:]),
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=10).stdout
-            frame_bytes = width * height * 3
+            frame_bytes = width * height * 3  # the preview geometry, not the source
             assert len(decoded) == (count - start) * frame_bytes
             for offset in range(count - start):
                 pixels = decoded[offset * frame_bytes:(offset + 1) * frame_bytes]
