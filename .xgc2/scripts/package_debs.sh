@@ -30,10 +30,11 @@ case "${ROS_DISTRO}" in
 esac
 
 VERSION="${PACKAGE_VERSION:-$(product_version)}"
-if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[1-9][0-9]*)?$ ]]; then
   echo "invalid package version: ${VERSION}" >&2
   exit 1
 fi
+UPSTREAM_VERSION="${VERSION%%-*}"
 if [[ ! "${SOURCE_DATE_EPOCH:-}" =~ ^[0-9]+$ ]]; then
   echo "SOURCE_DATE_EPOCH must be a non-negative integer" >&2
   exit 1
@@ -166,7 +167,7 @@ else
   for metadata_name in \
     PKG-INFO dependency_links.txt entry_points.txt requires.txt top_level.txt zip-safe; do
     copy_owned_file \
-      "${PYTHON_SITE}/${ROS_PACKAGE}-${VERSION}-py${PYTHON_VERSION}.egg-info/${metadata_name}"
+      "${PYTHON_SITE}/${ROS_PACKAGE}-${UPSTREAM_VERSION}-py${PYTHON_VERSION}.egg-info/${metadata_name}"
   done
 
   package_sh="${PKG_ROOT}${PREFIX}/share/${ROS_PACKAGE}/package.sh"
@@ -254,12 +255,12 @@ EOF
     return
   fi
   cat <<EOF
-${PYTHON_SITE}/${ROS_PACKAGE}-${VERSION}-py${PYTHON_VERSION}.egg-info/PKG-INFO
-${PYTHON_SITE}/${ROS_PACKAGE}-${VERSION}-py${PYTHON_VERSION}.egg-info/dependency_links.txt
-${PYTHON_SITE}/${ROS_PACKAGE}-${VERSION}-py${PYTHON_VERSION}.egg-info/entry_points.txt
-${PYTHON_SITE}/${ROS_PACKAGE}-${VERSION}-py${PYTHON_VERSION}.egg-info/requires.txt
-${PYTHON_SITE}/${ROS_PACKAGE}-${VERSION}-py${PYTHON_VERSION}.egg-info/top_level.txt
-${PYTHON_SITE}/${ROS_PACKAGE}-${VERSION}-py${PYTHON_VERSION}.egg-info/zip-safe
+${PYTHON_SITE}/${ROS_PACKAGE}-${UPSTREAM_VERSION}-py${PYTHON_VERSION}.egg-info/PKG-INFO
+${PYTHON_SITE}/${ROS_PACKAGE}-${UPSTREAM_VERSION}-py${PYTHON_VERSION}.egg-info/dependency_links.txt
+${PYTHON_SITE}/${ROS_PACKAGE}-${UPSTREAM_VERSION}-py${PYTHON_VERSION}.egg-info/entry_points.txt
+${PYTHON_SITE}/${ROS_PACKAGE}-${UPSTREAM_VERSION}-py${PYTHON_VERSION}.egg-info/requires.txt
+${PYTHON_SITE}/${ROS_PACKAGE}-${UPSTREAM_VERSION}-py${PYTHON_VERSION}.egg-info/top_level.txt
+${PYTHON_SITE}/${ROS_PACKAGE}-${UPSTREAM_VERSION}-py${PYTHON_VERSION}.egg-info/zip-safe
 ${PYTHON_SITE}/${ROS_PACKAGE}/__init__.py
 ${PYTHON_SITE}/${ROS_PACKAGE}/control_socket.py
 ${PYTHON_SITE}/${ROS_PACKAGE}/encoder.py

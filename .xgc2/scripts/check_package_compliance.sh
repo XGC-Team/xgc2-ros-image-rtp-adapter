@@ -82,10 +82,14 @@ if grep -RInE \
 fi
 
 version="$(awk -F': *' '/^version:[[:space:]]*/ {print $2; exit}' .xgc2/product.yml)"
-test -n "${version}"
-grep -Fq "<version>${version}</version>" package.xml
-grep -Fq "version=\"${version}\"" setup.py
-grep -Fq "<version>${version}</version>" ros1/package.xml
+[[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[1-9][0-9]*)?$ ]]
+upstream_version="${version%%-*}"
+grep -Fq "<version>${upstream_version}</version>" package.xml
+grep -Fq "version=\"${upstream_version}\"" setup.py
+grep -Fq "<version>${upstream_version}</version>" ros1/package.xml
+for suite in focal jammy noble; do
+  grep -Fxq "    ${suite}: ${version}" .xgc2/product.yml
+done
 grep -Fxq 'kind: mixed' .xgc2/product.yml
 grep -A1 -Fxq '  dependency_policy:' .xgc2/product.yml
 grep -Fxq '    xgc2-media-edge: verify' .xgc2/product.yml
@@ -96,11 +100,11 @@ fi
 for owned_path in \
   /opt/ros/noetic/lib/pkgconfig/ros_image_rtp_adapter.pc \
   /opt/ros/humble/lib/python3.10/site-packages/ros_image_rtp_adapter \
-  /opt/ros/humble/lib/python3.10/site-packages/ros_image_rtp_adapter-${version}-py3.10.egg-info \
+  /opt/ros/humble/lib/python3.10/site-packages/ros_image_rtp_adapter-${upstream_version}-py3.10.egg-info \
   /opt/ros/humble/share/ament_index/resource_index/packages/ros_image_rtp_adapter \
   /opt/ros/humble/share/colcon-core/packages/ros_image_rtp_adapter \
   /opt/ros/jazzy/share/ament_index/resource_index/packages/ros_image_rtp_adapter \
-  /opt/ros/jazzy/lib/python3.12/site-packages/ros_image_rtp_adapter-${version}-py3.12.egg-info \
+  /opt/ros/jazzy/lib/python3.12/site-packages/ros_image_rtp_adapter-${upstream_version}-py3.12.egg-info \
   /opt/ros/jazzy/share/colcon-core/packages/ros_image_rtp_adapter \
   /usr/share/doc/ros-noetic-xgc2-ros-image-rtp-adapter \
   /usr/share/doc/ros-humble-xgc2-ros-image-rtp-adapter \
