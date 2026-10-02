@@ -325,8 +325,8 @@ def _ffmpeg_codec_arguments(
         # scene cut can otherwise create an arbitrarily larger short burst even
         # while a static camera appears to sustain 30 Hz.
         return [
-            "-preset", "llhq", "-profile:v", "high", "-pix_fmt", "yuv420p",
-            "-rc", "cbr_ld_hq", "-zerolatency", "1",
+            "-preset", "p4", "-tune", "ll", "-profile:v", "high", "-pix_fmt", "yuv420p",
+            "-rc", "cbr", "-multipass", "qres", "-zerolatency", "1",
             "-delay",
             # MJPEG CPU decode and NVENC can overlap across bounded surfaces.
             # Zero serializes both stages on each frame (4K falls below 30 Hz).

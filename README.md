@@ -234,8 +234,10 @@ AgentLink, Core, SSE, or the robot telemetry plane.
 Runtime markers are `@bitrate`, `@bitrate_kbps`, `@fps`, `@gop`, `@width`,
 `@height`, and, for caps, `@fps_fraction`.
 
-The built-in `h264_nvenc` path is not the unconstrained FFmpeg default. It uses
-4:2:0 High profile, low-latency CBR, `maxrate == bitrate`, a one-second VBV
+The built-in `h264_nvenc` path requires FFmpeg with the modern NVENC preset API
+(the station supplies FFmpeg 7.1.5 built with NVENC headers 13.0.19.0).
+It uses P4 with low-latency tuning and quarter-resolution multipass CBR,
+4:2:0 High profile, `maxrate == bitrate`, a one-second VBV
 (`bufsize == bitrate`), fixed one-second GOP, no B-frames, no lookahead, no
 scene-cut I-frames, and strict GOP rate control. This makes motion-induced RTP
 bursts bounded enough for the paired Media Edge receive queue to be calculated.

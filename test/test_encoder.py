@@ -73,7 +73,10 @@ def test_nvenc_uses_a_bounded_low_latency_burst_contract():
     command = make_encoder(encoder="h264_nvenc")._build_command()
 
     assert command[command.index("-pix_fmt") + 1] == "yuv420p"
-    assert command[command.index("-rc") + 1] == "cbr_ld_hq"
+    assert command[command.index("-preset") + 1] == "p4"
+    assert command[command.index("-tune") + 1] == "ll"
+    assert command[command.index("-rc") + 1] == "cbr"
+    assert command[command.index("-multipass") + 1] == "qres"
     assert command[command.index("-maxrate") + 1] == "2500000"
     assert command[command.index("-bufsize") + 1] == "2500000"
     assert command[command.index("-bf") + 1] == "0"
@@ -282,7 +285,7 @@ def test_preview_decodes_an_exact_half_size_jpeg_at_preview_resolution():
     assert command[command.index("-maxrate") + 1] == "8000000"
     assert command[command.index("-bufsize") + 1] == "8000000"
     assert command[command.index("-delay") + 1] == "2"
-    assert command[command.index("-rc") + 1] == "cbr_ld_hq"
+    assert command[command.index("-rc") + 1] == "cbr"
     assert command[command.index("-bsf:v") + 1] == "dump_extra=freq=keyframe,h264_metadata=aud=insert"
     assert command[-3:] == ["-f", "h264", "pipe:1"]
     assert not any(argument.startswith("rtp://") for argument in command)
