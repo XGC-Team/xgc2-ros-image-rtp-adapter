@@ -2,6 +2,15 @@ from ros_image_rtp_adapter.runtime import ImageRtpAdapterRuntime
 from ros_image_rtp_adapter.settings import AdapterSettings
 import threading
 import time
+from io import BytesIO
+from PIL import Image
+
+
+def jpeg_frame(index=0):
+    output = BytesIO()
+    Image.new("RGB", (16, 16), ((index * 19) % 256, (index * 31) % 256,
+                              (index * 53) % 256)).save(output, format="JPEG")
+    return output.getvalue()
 
 
 class FakeEncoder:
@@ -49,7 +58,7 @@ def make_runtime(tmp_path, **overrides):
 
 def test_runtime_encodes_each_fresh_compressed_frame_once(tmp_path):
     runtime, encoder = make_runtime(tmp_path)
-    jpeg = b"\xff\xd8frame\xff\xd9"
+    jpeg = jpeg_frame()
 
     runtime.set_active(True)
     assert runtime.submit_compressed(jpeg, "jpeg")
@@ -62,8 +71,8 @@ def test_runtime_encodes_each_fresh_compressed_frame_once(tmp_path):
 
 def test_fresh_snapshot_waits_for_the_next_latest_frame(tmp_path):
     runtime, _encoder = make_runtime(tmp_path, fps=20.0)
-    first = b"\xff\xd8first\xff\xd9"
-    second = b"\xff\xd8second\xff\xd9"
+    first = jpeg_frame(1)
+    second = jpeg_frame(2)
     runtime.submit_compressed(first, "jpeg")
 
     result = []
@@ -82,7 +91,7 @@ def test_compressed_snapshot_is_exact_passthrough_without_raw_jpeg_encoding(
     tmp_path, monkeypatch
 ):
     runtime, _encoder = make_runtime(tmp_path)
-    sentinel = b"\xff\xd8physical-camera-sentinel\x00\x01\xff\xd9"
+    sentinel = jpeg_frame(3)
 
     def unexpected_raw_encode(*_args, **_kwargs):
         raise AssertionError("compressed snapshot must not invoke raw JPEG encoding")
@@ -96,8 +105,8 @@ def test_compressed_snapshot_is_exact_passthrough_without_raw_jpeg_encoding(
 
 def test_runtime_set_active_discards_pending_but_accepts_fresh_recovery(tmp_path):
     runtime, encoder = make_runtime(tmp_path)
-    old = b"\xff\xd8old\xff\xd9"
-    fresh = b"\xff\xd8fresh\xff\xd9"
+    old = jpeg_frame(4)
+    fresh = jpeg_frame(5)
 
     runtime.set_active(True)
     runtime.submit_compressed(old, "jpeg")
@@ -130,7 +139,7 @@ def test_runtime_accepts_explicit_packed_raw_input(tmp_path):
 
 def test_runtime_default_inactive_releases_encoder_on_stop(tmp_path):
     runtime, encoder = make_runtime(tmp_path)
-    jpeg = b"\xff\xd8frame\xff\xd9"
+    jpeg = jpeg_frame()
 
     assert runtime.submit_compressed(jpeg, "jpeg")
     assert not runtime.pump()
@@ -160,7 +169,7 @@ def test_runtime_start_preflights_without_allocating_encoder(tmp_path):
 
 def test_started_runtime_pumps_each_arriving_frame_without_a_same_rate_poll_timer(tmp_path):
     runtime, encoder = make_runtime(tmp_path, fps=30.0)
-    frames = [b"\xff\xd8frame-%02d\xff\xd9" % index for index in range(20)]
+    frames = [jpeg_frame(index) for index in range(20)]
 
     runtime.start()
     try:
@@ -237,7 +246,7 @@ def test_each_active_encoder_receives_every_kept_frame(tmp_path):
     runtime, rtp, preview, _created = make_preview_runtime(tmp_path)
     runtime.set_active(True)
     runtime.set_video_active(True)
-    jpeg = b"\xff\xd8frame\xff\xd9"
+    jpeg = jpeg_frame()
 
     assert runtime.submit_compressed(jpeg, "jpeg", source_stamp_ns=10)
     assert runtime.pump()
@@ -250,20 +259,20 @@ def test_video_only_demand_leaves_the_rtp_queue_empty(tmp_path):
     runtime, rtp, preview, _created = make_preview_runtime(tmp_path)
     runtime.set_video_active(True)
 
-    assert runtime.submit_compressed(b"\xff\xd8a\xff\xd9", "jpeg", source_stamp_ns=10)
-    assert runtime.submit_compressed(b"\xff\xd8b\xff\xd9", "jpeg", source_stamp_ns=20)
+    assert runtime.submit_compressed(jpeg_frame(6), "jpeg", source_stamp_ns=10)
+    assert runtime.submit_compressed(jpeg_frame(7), "jpeg", source_stamp_ns=20)
     status = runtime.status()
     assert status["rtp"]["pending"] == 0 and status["rtp"]["frames_dropped"] == 0
     assert status["ros-preview"]["frames_dropped"] == 1
     assert runtime.pump()
     assert rtp.frames == []
-    assert preview.frames == [(b"\xff\xd8b\xff\xd9", 20)]
+    assert preview.frames == [(jpeg_frame(7), 20)]
 
 
 def test_h264_timestamp_follows_kept_source_after_input_drop(tmp_path):
     runtime, _rtp, preview, _created = make_preview_runtime(tmp_path)
     runtime.set_video_active(True)
-    jpeg = b"\xff\xd8frame\xff\xd9"
+    jpeg = jpeg_frame()
     assert not runtime.submit_compressed(jpeg, "jpeg", source_stamp_ns=0)
     runtime.submit_compressed(jpeg, "jpeg", source_stamp_ns=10)
     runtime.submit_compressed(jpeg, "jpeg", source_stamp_ns=20)

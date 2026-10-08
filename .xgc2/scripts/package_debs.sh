@@ -306,6 +306,8 @@ test -f "${PKG_ROOT}${PREFIX}/${PYTHON_SITE}/${ROS_PACKAGE}/node.py"
 test -f "${PKG_ROOT}${PREFIX}/${PYTHON_SITE}/${ROS_PACKAGE}/runtime.py"
 test -x "${PKG_ROOT}${PREFIX}/lib/${ROS_PACKAGE}/image_rtp_adapter"
 
+XRPC_DEBIAN_DEPENDENCY="$(python3 "${SCRIPT_DIR}/check_python_runtime.py" --debian-dependency)"
+
 mkdir -p "${OUTPUT_DIR}" "${PKG_ROOT}/DEBIAN" \
   "${PKG_ROOT}/usr/share/doc/${PACKAGE}"
 
@@ -314,6 +316,8 @@ if [[ "${ROS_DISTRO}" == "noetic" ]]; then
 else
   DEPENDS="ros-${ROS_DISTRO}-rclpy, ros-${ROS_DISTRO}-sensor-msgs, ros-${ROS_DISTRO}-std-msgs, ros-${ROS_DISTRO}-launch, ros-${ROS_DISTRO}-launch-ros, ffmpeg, python3-numpy, python3-pil, gstreamer1.0-tools, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly"
 fi
+
+DEPENDS="${DEPENDS}, python3 (>= 3.10), ${XRPC_DEBIAN_DEPENDENCY}"
 
 cat >"${PKG_ROOT}/DEBIAN/control" <<EOF
 Package: ${PACKAGE}

@@ -6,9 +6,9 @@ explicit `sensor_msgs/Image` or JPEG `sensor_msgs/CompressedImage` topic into
 the same local source contract used by every other XGC2 camera source:
 
 - H264/RTP payload type 96 on a fixed loopback UDP port;
-- newline-delimited source control on an absolute Unix socket;
+- shared XRPC HTTP/1.1 source control on a private absolute Unix socket;
 - stable `sourceId`, dimensions, rate, and optical frame metadata;
-- independent `set-active`, keyframe, snapshot, and fresh-snapshot operations.
+- source-scoped start/stop, status, revision-checked configuration and capture.
 
 Topic names, ROS version, message type, pixel format, encoder backend, element
 factories, and element properties are configuration. There is no Odin, B2,
@@ -57,8 +57,8 @@ For `compressed` input, the adapter also retains exactly one latest source JPEG
 for snapshot transactions. `requireFresh=true` records the frame sequence when
 the request arrives and blocks until a later message replaces it; the request
 therefore never reuses a pre-request frame. JPEG-only snapshots return those
-exact camera bytes as `source-jpeg-passthrough` and do not invoke Pillow or a
-second JPEG encoder. Raw input retains the compatible Pillow/libjpeg snapshot
+exact camera bytes as `source-jpeg-passthrough`; Pillow validates JPEG geometry
+without re-encoding it. Raw input uses Pillow/libjpeg snapshot
 path only when that source mode is explicitly selected.
 Dimensions and raw encoding are explicit, fixed Session configuration; a
 mismatched message is rejected instead of silently changing the stream
@@ -67,10 +67,63 @@ also stops RTP rather than replaying the final frame forever.
 
 The adapter starts inactive. Backend capabilities are preflighted during
 readiness, but the encoder process and any hardware encoder session are not
-allocated until Edge sends `set-active=true`. When the last viewer/recording
-releases the source, `set-active=false` clears pending frames and terminates the
+allocated until Edge calls the source `start`. When the last viewer/recording
+releases the source, `stop` clears pending frames and terminates the
 encoder. The ROS publisher may remain shared with other consumers without
 holding an idle NVENC session for this video path.
+
+## XRPC source control
+
+The shared [source control contract](../../../common/media-edge/contracts/source-control-v1.md)
+defines GET `/v1/describe` service discovery and source-scoped
+`/v1/media/sources/{sourceId}/{describe,status,start,stop,request-keyframe,capture,config}`.
+Consumers discover the fresh `service_ref.instance_id` and bind every subsequent
+call to it. The old private NDJSON listener and unscoped control routes are removed.
+The adapter owns one explicit SDK Runtime with four blocking workers, four call
+slots and eight connections. Native encoders and ROS frame callbacks stay outside
+the SDK I/O loop; there is no per-client or per-robot control thread.
+The composition root snapshots `XGC2_XRPC_` settings once through the SDK resolver
+before native allocation; Host and any Client share that resolved policy. Status
+reports effective values, sources, ceilings and runtime capacity. Unsupported
+gRPC settings, unknown prefix variables and values above product ceilings fail
+startup explicitly; this product does not maintain a second environment resolver.
+
+`start` and `stop` report `completion:applied` only after native encoder state
+matches the request. A running encoder does not prove that a camera exists or
+images arrive; status exposes input/output/drop counters separately. These stdin
+encoder backends cannot force a live IDR. They advertise bounded GOP, omit the
+force-IDR capability, and return 501 `unsupported` for explicit keyframe requests.
+Capture therefore defaults `requestKeyframe` to false.
+
+PATCH `config` takes `{expected_revision,persist:false,config}`. Loopback
+`rtp_host`, `rtp_port` and profile-supported `bitrate` apply only while RTP is idle,
+after a new encoder passes native preflight. GET config distinguishes desired,
+applied and persisted revisions. Fixed custom bitrate profiles own their bitrate
+and omit the generic bitrate from applied configuration and mutable fields;
+other startup parameters return `restart_required`. Configuration
+is process-local and ephemeral; restart restores the deployment's settings.
+
+Capture uses bounded native multipart metadata/JPEG/optional RGB8, without
+Base64 or a whole-capture join. Dimensions come from the retained image, with
+the same ROS header stamp, frame ID and positive adapter frame sequence. A
+declared `source_clock_domain` identifies the stamp's clock; the default is
+`unknown`, and zero source time is preserved. The adapter has no calibration
+input and reports `calibrationState:unavailable` without inventing K/distortion.
+Each JPEG is at most 32 MiB and 16,777,216 decoded pixels; RGB must have exactly
+width × height × 3 bytes. Each encoder queue has both its frame-count bound and
+a 64 MiB byte bound. One capture conversion and at most four responses may be
+in flight. These are enforced resource bounds, not measured peak RSS.
+
+An empty `control_socket` selects
+`$XDG_RUNTIME_DIR/xgc2-camera/<source_id>.sock` (or `/run/user/<uid>` as the
+runtime root). The existing runtime root and child must be owned by the effective
+user and mode 0700; the child alone is created if absent. Existing directories are
+never chmodded. Explicit endpoints require a pre-provisioned owned 0700 parent.
+The SDK rejects symlinks, retains endpoint leases through real handler completion,
+and only unlinks the socket inode it owns. There is no public `/tmp` fallback.
+Socket and lock files are ephemeral runtime state; frames and online settings
+are held in bounded memory, and this module writes no database or frame archive.
+ROS logging remains owned by the ROS process's configured log destination.
 
 ## Encoder backends
 
@@ -101,9 +154,6 @@ state that NVIDIA FFmpeg hardware acceleration is not supported there.
 ## Install
 
 ```bash
-# ROS 1 Noetic / Ubuntu 20.04
-sudo apt install ros-noetic-xgc2-ros-image-rtp-adapter
-
 # ROS 2 Humble / Ubuntu 22.04
 sudo apt install ros-humble-xgc2-ros-image-rtp-adapter
 
@@ -113,6 +163,20 @@ sudo apt install ros-jazzy-xgc2-ros-image-rtp-adapter
 
 Packages include the portable FFmpeg/GStreamer dependencies. NVIDIA plugins
 and GPU device access belong to the Agent container/runtime image.
+
+This XRPC revision requires Python >=3.10 and the installed shared
+`xgc2-xrpc==0.1.0` distribution (aiohttp 3.14.4, HTTPX 0.28.1, httpcore 1.0.9).
+The package gate resolves the SDK's real Debian file owner and pins that exact
+package dependency; a source checkout or pip-only build dependency cannot produce
+a deployable DEB. The approved ROS build images and SDK Debian publication still
+need to satisfy this gate. Noetic/Focal's default Python 3.8 cannot run this
+revision; its replacement runtime/image is unresolved. No PPA or older aiohttp
+version is substituted to claim Focal support.
+
+The current SDK is a candidate, and its `0.1.0` distribution label is not an
+immutable published ABI. Preflight checks the actual native/policy API and emits
+the installed package versions and SDK source SHA256 in a build receipt. Product
+and SDK publication still need coordinated immutable pins and deployment proof.
 
 ## Run
 
@@ -125,7 +189,7 @@ ros2 launch ros_image_rtp_adapter image_rtp_adapter.launch.py \
   input_message_type:=compressed \
   source_id:=front \
   rtp_port:=5004 \
-  control_socket:=/tmp/xgc2/media/front.sock \
+  control_socket:=/run/user/1000/xgc2-camera/front.sock \
   width:=1280 height:=720 fps:=15.0
 ```
 
@@ -140,7 +204,7 @@ ros2 run ros_image_rtp_adapter image_rtp_adapter --ros-args \
   -p raw_encoding:=bgr8 \
   -p source_id:=front \
   -p rtp_port:=5004 \
-  -p control_socket:=/tmp/xgc2/media/front.sock \
+  -p control_socket:=/run/user/1000/xgc2-camera/front.sock \
   -p width:=1280 -p height:=720 -p fps:=30.0
 ```
 
@@ -153,7 +217,7 @@ roslaunch ros_image_rtp_adapter image_rtp_adapter.launch \
   input_message_type:=compressed \
   source_id:=front \
   rtp_port:=5004 \
-  control_socket:=/tmp/xgc2/media/front.sock
+  control_socket:=/run/user/1000/xgc2-camera/front.sock
 ```
 
 For ROS 1 on a validated Jetson container, select the ROS 1 form of the same
@@ -166,7 +230,7 @@ roslaunch ros_image_rtp_adapter image_rtp_adapter.launch \
   image_topic:=/camera/front/image_raw \
   input_message_type:=raw raw_encoding:=bgr8 \
   source_id:=front rtp_port:=5004 \
-  control_socket:=/tmp/xgc2/media/front.sock \
+  control_socket:=/run/user/1000/xgc2-camera/front.sock \
   width:=1280 height:=720 fps:=30.0
 ```
 
@@ -178,12 +242,12 @@ Pair one or more adapters/native sources with one Edge process:
     {
       "id": "front",
       "rtpListenAddress": "127.0.0.1:5004",
-      "controlSocket": "/tmp/xgc2/media/front.sock"
+      "controlSocket": "/run/user/1000/xgc2-camera/front.sock"
     },
     {
       "id": "world",
       "rtpListenAddress": "127.0.0.1:5006",
-      "controlSocket": "/tmp/xgc2/media/world.sock"
+      "controlSocket": "/run/user/1000/xgc2-camera/world.sock"
     }
   ]
 }
@@ -217,7 +281,8 @@ AgentLink, Core, SSE, or the robot telemetry plane.
 | `source_id` | `camera` | Stable Edge source ID |
 | `frame_id` | `camera_optical` | Optical frame in describe/snapshot |
 | `rtp_host` / `rtp_port` | `127.0.0.1` / `5004` | Fixed loopback RTP destination |
-| `control_socket` | `/tmp/xgc2-image-rtp-adapter.sock` | Absolute Unix control socket |
+| `source_clock_domain` | `unknown` | Explicit simulation/system_realtime/monotonic/device/unknown clock |
+| `control_socket` | empty | Derive private user-runtime endpoint; explicit parents require 0700 |
 | `width` / `height` / `fps` | 1280 / 720 / 15 | Fixed output and raw-input contract |
 | `bitrate` | 2500000 | Target H264 bitrate |
 | `video_topic` | empty | ROS 1 `foxglove_msgs/CompressedVideo` preview topic; empty disables it |
@@ -228,8 +293,8 @@ AgentLink, Core, SSE, or the robot telemetry plane.
 | `ffmpeg_encoder_args_json` | `[]` | Structured FFmpeg argument array |
 | `ffmpeg_video_filter` | generated scale/pad | Optional FFmpeg filter expression |
 | `gstreamer_*` | portable software pipeline | Element, caps, and property profile |
-| `drop_to_latest` | `true` | One-frame queue; `false` selects bounded depth 32 |
-| `require_jpeg` | `true` | Validate complete JPEG compressed frames |
+| `drop_to_latest` | `true` | One-frame queue; `false` selects depth 32, both capped at 64 MiB |
+| `require_jpeg` | `true` | Complete bounded JPEG required; false is explicitly rejected |
 
 Runtime markers are `@bitrate`, `@bitrate_kbps`, `@fps`, `@gop`, `@width`,
 `@height`, and, for caps, `@fps_fraction`.
@@ -255,7 +320,9 @@ The CI and release matrices cover:
 | Humble | Jammy | amd64, arm64 |
 | Jazzy | Noble | amd64, arm64 |
 
-Every cell builds a real DEB, installs it in its matching ROS/Ubuntu image,
+The deployment gate must first pass the actual interpreter/installed XRPC
+dependency check; Focal currently fails that check. Eligible cells build a real DEB,
+install it in the matching ROS/Ubuntu image,
 runs the shared unit suite, proves JPEG and raw GStreamer RTP emission, and
 runs publisher -> adapter -> Media Edge contract integration from the installed
 `/opt/ros/<distro>` package in a workspace-free environment. Push CI uses the
@@ -274,7 +341,8 @@ PYTHONPATH=. python3 -m pytest \
   test/test_control_socket.py test/test_encoder.py \
   test/test_frames.py test/test_h264.py test/test_h264_integration.py \
   test/test_media_edge_source_roster.py test/test_preview_geometry.py \
-  test/test_runtime.py -q
+  test/test_runtime.py test/test_source_control.py \
+  test/test_python_runtime_dependency.py test/test_native_source.py -q
 ./.xgc2/scripts/check_package_compliance.sh
 
 # Full container package/integration gate
@@ -305,7 +373,7 @@ source JPEG/raw frame --+--> RTP encoder (width x height, bitrate)  -> Media Edg
 ```
 
 Each encoder runs only while its own consumers exist: Media Edge
-`set-active` holds the RTP encoder, ROS subscribers hold the preview encoder.
+Source start/stop controls the RTP encoder; ROS subscribers hold the preview encoder.
 A WebRTC viewer joining or leaving therefore never restarts the ROS stream,
 and a ROS subscriber never restarts RTP (whose timestamps must not regress
 under live WebRTC sessions). With only ROS subscribers there is exactly one

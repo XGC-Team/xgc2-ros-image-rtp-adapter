@@ -40,14 +40,14 @@ class ImageRtpAdapterNode(Node):
                 CompressedImage,
                 self._settings.image_topic,
                 self._on_compressed_image,
-                10,
+                1,
             )
         else:
             self._subscription = self.create_subscription(
                 Image,
                 self._settings.image_topic,
                 self._on_raw_image,
-                10,
+                1,
             )
         self._status_timer = self.create_timer(5.0, self._log_status)
 
@@ -74,15 +74,19 @@ class ImageRtpAdapterNode(Node):
         return super().destroy_node()
 
     def _on_compressed_image(self, message: CompressedImage) -> None:
-        self._runtime.submit_compressed(bytes(message.data), message.format)
+        self._runtime.submit_compressed(message.data, message.format,
+            source_stamp_ns=message.header.stamp.sec * 1_000_000_000 + message.header.stamp.nanosec,
+            frame_id=message.header.frame_id)
 
     def _on_raw_image(self, message: Image) -> None:
         self._runtime.submit_raw(
-            bytes(message.data),
+            message.data,
             width=message.width,
             height=message.height,
             step=message.step,
             encoding=message.encoding,
+            source_stamp_ns=message.header.stamp.sec * 1_000_000_000 + message.header.stamp.nanosec,
+            frame_id=message.header.frame_id,
         )
 
     def _log_status(self) -> None:

@@ -43,15 +43,15 @@ class ImageRtpAdapterROS1Node:
                 self._settings.image_topic,
                 CompressedImage,
                 self._on_compressed_image,
-                queue_size=10,
-                buff_size=16 * 1024 * 1024,
+                queue_size=1,
+                buff_size=32 * 1024 * 1024,
             )
         else:
             self._subscription = rospy.Subscriber(
                 self._settings.image_topic,
                 Image,
                 self._on_raw_image,
-                queue_size=10,
+                queue_size=1,
                 buff_size=64 * 1024 * 1024,
             )
         self._video_timer = rospy.Timer(rospy.Duration(0.25), self._update_video_consumer)
@@ -82,16 +82,18 @@ class ImageRtpAdapterROS1Node:
 
     def _on_compressed_image(self, message: CompressedImage) -> None:
         self._runtime.submit_compressed(
-            bytes(message.data), message.format, source_stamp_ns=message.header.stamp.to_nsec())
+            message.data, message.format, source_stamp_ns=message.header.stamp.to_nsec(),
+            frame_id=message.header.frame_id)
 
     def _on_raw_image(self, message: Image) -> None:
         self._runtime.submit_raw(
-            bytes(message.data),
+            message.data,
             width=message.width,
             height=message.height,
             step=message.step,
             encoding=message.encoding,
             source_stamp_ns=message.header.stamp.to_nsec(),
+            frame_id=message.header.frame_id,
         )
 
     def _update_video_consumer(self, _event) -> None:

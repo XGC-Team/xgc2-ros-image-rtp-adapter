@@ -201,6 +201,9 @@ docker run --rm \
     set +u
     source /opt/ros/${ROS_DISTRO}/setup.bash
     set -u
+    # Validate the real interpreter and installed shared SDK before compiling.
+    # A source checkout on PYTHONPATH does not satisfy package deployment.
+    python3 /workspace/work/source/.xgc2/scripts/check_python_runtime.py
     if [[ "${ROS_DISTRO}" == "noetic" ]]; then
       mkdir -p /workspace/work/catkin/src
       ln -s /workspace/work/source/ros1 \
@@ -228,6 +231,9 @@ docker run --rm \
       /workspace/work/source/test/test_media_edge_source_roster.py \
       /workspace/work/source/test/test_preview_geometry.py \
       /workspace/work/source/test/test_runtime.py -q
+    PYTHONPATH=/workspace/work/source python3 -m pytest \
+      /workspace/work/source/test/test_source_control.py \
+      /workspace/work/source/test/test_python_runtime_dependency.py -q
     PYTHONPATH=/workspace/work/source \
       python3 /workspace/work/source/scripts/integration_gstreamer_rtp.py
 

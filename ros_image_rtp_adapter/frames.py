@@ -87,6 +87,21 @@ def require_jpeg_bytes(data: bytes) -> bytes:
     return data
 
 
+def jpeg_geometry(data: bytes, max_pixels: int) -> Tuple[int, int]:
+    """Validate native JPEG framing/geometry before any decoder allocation."""
+    from PIL import Image
+    require_jpeg_bytes(data)
+    try:
+        with Image.open(BytesIO(data)) as image:
+            width, height = image.size
+            if image.format != "JPEG" or width < 1 or height < 1 or width * height > max_pixels:
+                raise FrameValidationError("snapshot JPEG exceeds bounded pixel geometry")
+            image.verify()
+            return width, height
+    except (OSError, ValueError, Image.DecompressionBombError) as error:
+        raise FrameValidationError("invalid snapshot JPEG: %s" % error) from error
+
+
 def pack_raw_frame(
     data: bytes,
     *,

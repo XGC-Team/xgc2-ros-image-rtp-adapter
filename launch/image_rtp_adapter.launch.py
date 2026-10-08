@@ -27,11 +27,13 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument("source_id", default_value="camera"),
             DeclareLaunchArgument("frame_id", default_value="camera_optical"),
+            DeclareLaunchArgument("source_clock_domain", default_value="unknown"),
             DeclareLaunchArgument("rtp_host", default_value="127.0.0.1"),
             DeclareLaunchArgument("rtp_port", default_value="5004"),
             DeclareLaunchArgument(
                 "control_socket",
-                default_value="/tmp/xgc2-image-rtp-adapter.sock",
+                default_value="",
+                description="Empty selects a private XDG runtime endpoint for source_id.",
             ),
             DeclareLaunchArgument("width", default_value="1280"),
             DeclareLaunchArgument("height", default_value="720"),
@@ -96,6 +98,7 @@ def generate_launch_description() -> LaunchDescription:
                         "raw_encoding": LaunchConfiguration("raw_encoding"),
                         "source_id": LaunchConfiguration("source_id"),
                         "frame_id": LaunchConfiguration("frame_id"),
+                        "source_clock_domain": LaunchConfiguration("source_clock_domain"),
                         "rtp_host": LaunchConfiguration("rtp_host"),
                         "rtp_port": ParameterValue(
                             LaunchConfiguration("rtp_port"),

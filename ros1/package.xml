@@ -17,6 +17,7 @@
 
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-pil</exec_depend>
+  <exec_depend version_gte="3.10">python3</exec_depend>
   <exec_depend>ffmpeg</exec_depend>
   <exec_depend>foxglove_msgs</exec_depend>
   <exec_depend>gstreamer1.0-tools</exec_depend>
@@ -25,5 +26,8 @@
   <exec_depend>gstreamer1.0-plugins-bad</exec_depend>
   <exec_depend>gstreamer1.0-plugins-ugly</exec_depend>
 
-  <export />
+  <export>
+    <xgc2_runtime python_requires="&gt;=3.10" python_package="xgc2-xrpc"
+                  python_version="0.1.0" transport="http.v1" />
+  </export>
 </package>

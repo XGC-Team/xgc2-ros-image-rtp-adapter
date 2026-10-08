@@ -3,9 +3,10 @@ input_message_type: compressed
 raw_encoding: bgr8
 source_id: camera
 frame_id: camera_optical
+source_clock_domain: unknown
 rtp_host: 127.0.0.1
 rtp_port: 5004
-control_socket: /tmp/xgc2-image-rtp-adapter.sock
+control_socket: ""  # private XDG runtime endpoint derived from source_id
 width: 1280
 height: 720
 fps: 15.0

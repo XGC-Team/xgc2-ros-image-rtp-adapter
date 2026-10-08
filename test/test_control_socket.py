@@ -5,44 +5,60 @@ import stat
 import tempfile
 import time
 import unittest
+from xgc2_xrpc import Runtime
 
-from ros_image_rtp_adapter.control_socket import SourceControlServer, SourceDescription
+from ros_image_rtp_adapter.control_socket import SourceControlServer, SourceDescription, SnapshotCapture
 
 
 def _request(path: str, payload: dict) -> dict:
-    deadline = time.time() + 5.0
-    last = None
-    while time.time() < deadline:
-        try:
-            conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            conn.settimeout(2.0)
-            conn.connect(path)
-            conn.sendall(json.dumps(payload).encode("utf-8") + b"\n")
-            data = b""
-            while b"\n" not in data:
-                chunk = conn.recv(65536)
-                if not chunk:
-                    break
-                data += chunk
-            conn.close()
-            line = data.split(b"\n", 1)[0]
-            return json.loads(line.decode("utf-8"))
-        except OSError as exc:
-            last = exc
-            time.sleep(0.05)
-    raise AssertionError("control socket not ready: %s" % last)
+    import email.parser
+    import email.policy
+    from xgc2_xrpc import Client, Fault
+    payload = dict(payload)
+    operation = payload.pop("operation")
+    try:
+        with Runtime() as runtime, Client(path,runtime=runtime) as client:
+            discovery = client.json("/v1/describe", method="GET")
+            reference = discovery["service_ref"]
+            client.instance_id = reference["instance_id"]
+            method = "GET" if operation in ("describe", "status") else "POST"
+            response = client.call("/v1/media/sources/" + discovery["sources"][0] + "/" + operation,
+                                   None if method == "GET" else payload, method=method)
+            if response.content_type.startswith("multipart/mixed"):
+                message = email.parser.BytesParser(policy=email.policy.default).parsebytes(
+                    ("Content-Type: " + response.content_type + "\r\n\r\n").encode() + response.body)
+                parts = list(message.iter_parts())
+                metadata = json.loads(parts[0].get_payload(decode=True))
+                assert len(parts[1].get_payload(decode=True)) == metadata["jpegBytes"]
+                return metadata
+            return json.loads(response.body)
+    except Fault as error:
+        return {"ok": False, "error": str(error), "code": error.code}
 
 
 class ControlSocketTest(unittest.TestCase):
+    def setUp(self):
+        self.runtime=Runtime()
+        self.directory=tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.addCleanup(self.runtime.close)
+
+    def make_server(self,*args,**kwargs):
+        return SourceControlServer(*args,runtime=self.runtime,**kwargs)
+
     def test_describe_set_active_and_snapshot(self):
-        fd, path = tempfile.mkstemp(prefix="xgc2-image-rtp-", suffix=".sock")
+        fd, path = tempfile.mkstemp(prefix="xgc2-image-rtp-", suffix=".sock", dir=self.directory.name)
         os.close(fd)
         os.unlink(path)
 
         active = {"value": True}
-        snaps = {"jpeg": b"\xff\xd8fakejpeg\xff\xd9", "include_rgb": []}
+        from io import BytesIO
+        from PIL import Image
+        image = BytesIO()
+        Image.new("RGB", (640, 360)).save(image, format="JPEG")
+        snaps = {"jpeg": image.getvalue(), "include_rgb": []}
 
-        server = SourceControlServer(
+        server = self.make_server(
             path,
             SourceDescription(
                 source_id="odin1",
@@ -52,11 +68,14 @@ class ControlSocketTest(unittest.TestCase):
                 height=360,
                 fps=10.0,
                 frame_id="camera_optical",
+                keyframe_request_supported=True,
             ),
             on_set_active=lambda v: active.__setitem__("value", v),
             on_request_keyframe=lambda: None,
             on_snapshot=lambda include_rgb, require_fresh: (
-                snaps["include_rgb"].append((include_rgb, require_fresh)) or snaps["jpeg"]
+                snaps["include_rgb"].append((include_rgb, require_fresh))
+                or SnapshotCapture(snaps["jpeg"], width=640, height=360,
+                                   frame_id="camera_optical", frame_sequence=1)
             ),
         )
         server.start()
@@ -72,10 +91,10 @@ class ControlSocketTest(unittest.TestCase):
             self.assertEqual(desc["snapshotJpegPolicy"], "source")
             self.assertEqual(desc["snapshotJpegBackend"], "source-jpeg-passthrough")
             self.assertEqual(desc["snapshotJpegHardwareState"], "source-owned")
-            self.assertIn("set-active", desc["capabilities"])
+            self.assertIn("start", desc["capabilities"])
             self.assertIn("fresh-snapshot", desc["capabilities"])
 
-            resp = _request(path, {"operation": "set-active", "active": False})
+            resp = _request(path, {"operation": "stop"})
             self.assertTrue(resp["ok"])
             self.assertFalse(active["value"])
 
@@ -83,7 +102,7 @@ class ControlSocketTest(unittest.TestCase):
             self.assertTrue(resp["ok"])
 
             resp = _request(path, {
-                "operation": "snapshot", "snapshotId": "jpeg-only", "includeRgb": False,
+                "operation": "capture", "snapshotId": "jpeg-only", "includeRgb": False,
                 "requireFresh": True,
             })
             self.assertTrue(resp["ok"])
@@ -93,9 +112,9 @@ class ControlSocketTest(unittest.TestCase):
             self.assertEqual(resp["jpegReadback"], "latest-source-frame")
             self.assertEqual(snaps["include_rgb"], [(False, True)])
 
-            resp = _request(path, {"operation": "set-active", "active": "yes"})
+            resp = _request(path, {"operation": "start", "active": "yes"})
             self.assertFalse(resp["ok"])
-            self.assertIn("boolean", resp["error"])
+            self.assertIn("unknown", resp["error"])
         finally:
             server.stop()
 
@@ -104,7 +123,7 @@ class ControlSocketTest(unittest.TestCase):
             path = os.path.join(directory, "source.sock")
             with open(path, "wb") as existing:
                 existing.write(b"owned by another process")
-            server = SourceControlServer(
+            server = self.make_server(
                 path,
                 SourceDescription("camera", "127.0.0.1", 5004, 640, 360, 10, "camera"),
             )
@@ -116,7 +135,7 @@ class ControlSocketTest(unittest.TestCase):
     def test_stop_wakes_the_blocked_accept_without_waiting_for_its_timeout(self):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "source.sock")
-            server = SourceControlServer(
+            server = self.make_server(
                 path,
                 SourceDescription("camera", "127.0.0.1", 5004, 640, 360, 10, "camera"),
             )
@@ -132,7 +151,7 @@ class ControlSocketTest(unittest.TestCase):
             stale.bind(path)
             stale.close()
 
-            server = SourceControlServer(
+            server = self.make_server(
                 path,
                 SourceDescription("camera", "127.0.0.1", 5004, 640, 360, 10, "camera"),
             )
@@ -153,7 +172,7 @@ class ControlSocketTest(unittest.TestCase):
             listener.listen(4)
             original = os.stat(path, follow_symlinks=False)
 
-            server = SourceControlServer(
+            server = self.make_server(
                 path,
                 SourceDescription("camera", "127.0.0.1", 5004, 640, 360, 10, "camera"),
             )
@@ -181,7 +200,7 @@ class ControlSocketTest(unittest.TestCase):
             os.mkdir(real_parent)
             os.symlink(real_parent, linked_parent)
             path = os.path.join(linked_parent, "source.sock")
-            server = SourceControlServer(
+            server = self.make_server(
                 path,
                 SourceDescription("camera", "127.0.0.1", 5004, 640, 360, 10, "camera"),
             )
@@ -192,7 +211,7 @@ class ControlSocketTest(unittest.TestCase):
     def test_stop_does_not_delete_replacement_entry(self):
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "source.sock")
-            server = SourceControlServer(
+            server = self.make_server(
                 path,
                 SourceDescription("camera", "127.0.0.1", 5004, 640, 360, 10, "camera"),
             )
@@ -205,14 +224,14 @@ class ControlSocketTest(unittest.TestCase):
                 self.assertEqual(replacement.read(), b"replacement")
 
     def test_failed_activation_keeps_server_available_and_inactive(self):
-        fd, path = tempfile.mkstemp(prefix="xgc2-image-rtp-", suffix=".sock")
+        fd, path = tempfile.mkstemp(prefix="xgc2-image-rtp-", suffix=".sock", dir=self.directory.name)
         os.close(fd)
         os.unlink(path)
 
         def fail_activation(_active):
             raise RuntimeError("encoder unavailable")
 
-        server = SourceControlServer(
+        server = self.make_server(
             path,
             SourceDescription(
                 source_id="camera",
@@ -227,7 +246,7 @@ class ControlSocketTest(unittest.TestCase):
         )
         server.start()
         try:
-            response = _request(path, {"operation": "set-active", "active": True})
+            response = _request(path, {"operation": "start"})
             self.assertFalse(response["ok"])
             self.assertIn("encoder unavailable", response["error"])
             self.assertFalse(server.active)

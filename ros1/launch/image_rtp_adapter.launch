@@ -6,7 +6,8 @@
   <arg name="source_id" default="camera" />
   <arg name="frame_id" default="camera_optical" />
   <arg name="rtp_port" default="5004" />
-  <arg name="control_socket" default="/tmp/xgc2-image-rtp-adapter.sock" />
+  <arg name="control_socket" default="" />
+  <arg name="source_clock_domain" default="unknown" />
   <arg name="width" default="1280" />
   <arg name="height" default="720" />
   <arg name="fps" default="15.0" />
@@ -27,6 +28,7 @@
     <param name="frame_id" value="$(arg frame_id)" />
     <param name="rtp_port" value="$(arg rtp_port)" />
     <param name="control_socket" value="$(arg control_socket)" />
+    <param name="source_clock_domain" value="$(arg source_clock_domain)" />
     <param name="width" value="$(arg width)" />
     <param name="height" value="$(arg height)" />
     <param name="fps" value="$(arg fps)" />

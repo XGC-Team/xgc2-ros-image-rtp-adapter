@@ -22,6 +22,7 @@
   <exec_depend>launch_ros</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>python3-pil</exec_depend>
+  <exec_depend version_gte="3.10">python3</exec_depend>
 
   <!-- Portable software backend plus generic GStreamer plugin surface. -->
   <exec_depend>ffmpeg</exec_depend>
@@ -38,5 +39,7 @@
 
   <export>
     <build_type>ament_python</build_type>
+    <xgc2_runtime python_requires="&gt;=3.10" python_package="xgc2-xrpc"
+                  python_version="0.1.0" transport="http.v1" />
   </export>
 </package>

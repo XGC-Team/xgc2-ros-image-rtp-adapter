@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import ipaddress
+import math
+import os
 import re
+import stat
 from typing import Any, Dict, Mapping
 
 from ros_image_rtp_adapter.frames import normalize_raw_encoding
@@ -16,9 +19,12 @@ PARAMETER_DEFAULTS: Dict[str, Any] = {
     "raw_encoding": "bgr8",
     "source_id": "camera",
     "frame_id": "camera_optical",
+    "source_clock_domain": "unknown",
     "rtp_host": "127.0.0.1",
     "rtp_port": 5004,
-    "control_socket": "/tmp/xgc2-image-rtp-adapter.sock",
+    # Empty selects the current user's private runtime directory after source_id
+    # is known. There is no public /tmp fallback.
+    "control_socket": "",
     "width": 1280,
     "height": 720,
     "fps": 15.0,
@@ -59,6 +65,46 @@ PARAMETER_DEFAULTS: Dict[str, Any] = {
 }
 
 _STABLE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+MAX_FRAME_BYTES = 32 << 20
+MAX_FRAME_PIXELS = 16 << 20
+
+
+def default_control_socket(source_id: str) -> str:
+    root = os.environ.get("XDG_RUNTIME_DIR") or "/run/user/%d" % os.geteuid()
+    return os.path.join(root, "xgc2-camera", source_id + ".sock")
+
+
+def prepare_default_control_directory(path: str, source_id: str) -> None:
+    """Provision only our private child; never chmod or follow existing paths."""
+    if path != default_control_socket(source_id):
+        return
+    root = os.path.dirname(os.path.dirname(path))
+    descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for component in root.split("/"):
+            if not component:
+                continue
+            next_descriptor = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                                      dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+        owner = os.fstat(descriptor)
+        if owner.st_uid != os.geteuid() or stat.S_IMODE(owner.st_mode) != 0o700:
+            raise PermissionError("XDG runtime directory must be owned and mode 0700")
+        try:
+            os.mkdir("xgc2-camera", 0o700, dir_fd=descriptor)
+        except FileExistsError:
+            pass
+        child = os.open("xgc2-camera", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                        dir_fd=descriptor)
+        try:
+            owner = os.fstat(child)
+            if owner.st_uid != os.geteuid() or stat.S_IMODE(owner.st_mode) != 0o700:
+                raise PermissionError("camera runtime directory must be owned and mode 0700")
+        finally:
+            os.close(child)
+    finally:
+        os.close(descriptor)
 
 
 @dataclass(frozen=True)
@@ -68,6 +114,7 @@ class AdapterSettings:
     raw_encoding: str
     source_id: str
     frame_id: str
+    source_clock_domain: str
     rtp_host: str
     rtp_port: int
     control_socket: str
@@ -103,15 +150,19 @@ class AdapterSettings:
     def from_mapping(cls, values: Mapping[str, Any]) -> "AdapterSettings":
         merged = dict(PARAMETER_DEFAULTS)
         merged.update(values)
+        if any(type(merged[name]) is not bool for name in ("drop_to_latest", "require_jpeg")):
+            raise ValueError("drop_to_latest and require_jpeg require booleans")
         settings = cls(
             image_topic=str(merged["image_topic"]).strip(),
             input_message_type=str(merged["input_message_type"]).strip().lower(),
             raw_encoding=str(merged["raw_encoding"]).strip().lower(),
             source_id=str(merged["source_id"]).strip(),
             frame_id=str(merged["frame_id"]).strip(),
+            source_clock_domain=str(merged["source_clock_domain"]).strip(),
             rtp_host=str(merged["rtp_host"]).strip(),
             rtp_port=int(merged["rtp_port"]),
-            control_socket=str(merged["control_socket"]).strip(),
+            control_socket=(str(merged["control_socket"]).strip()
+                            or default_control_socket(str(merged["source_id"]).strip())),
             width=int(merged["width"]),
             height=int(merged["height"]),
             fps=float(merged["fps"]),
@@ -160,11 +211,17 @@ class AdapterSettings:
             raise ValueError("image_topic must be a non-empty ROS topic name")
         if self.input_message_type not in {"compressed", "raw"}:
             raise ValueError("input_message_type must be one of: compressed, raw")
+        if not self.require_jpeg:
+            raise ValueError("require_jpeg:false is unsupported; compressed input must be JPEG")
         normalize_raw_encoding(self.raw_encoding)
         if not _STABLE_ID.fullmatch(self.source_id):
             raise ValueError("source_id must be a stable identifier")
         if not self.frame_id:
             raise ValueError("frame_id must be non-empty")
+        if len(self.frame_id.encode("utf-8")) > 256:
+            raise ValueError("frame_id exceeds bounded source identity")
+        if self.source_clock_domain not in {"simulation", "system_realtime", "monotonic", "device", "unknown"}:
+            raise ValueError("source_clock_domain must declare a supported timestamp domain")
         if self.rtp_host != "localhost":
             try:
                 if not ipaddress.ip_address(self.rtp_host).is_loopback:
@@ -173,11 +230,14 @@ class AdapterSettings:
                 raise ValueError("rtp_host must be loopback") from exc
         if self.rtp_port < 1 or self.rtp_port > 65_535:
             raise ValueError("rtp_port must be in 1..65535")
-        if not self.control_socket.startswith("/"):
-            raise ValueError("control_socket must be an absolute Unix socket path")
+        if (not os.path.isabs(self.control_socket) or os.path.normpath(self.control_socket) != self.control_socket
+                or len(os.fsencode(self.control_socket)) > 107):
+            raise ValueError("control_socket must be a normalized absolute Unix path within 107 bytes")
         if self.width < 16 or self.height < 16:
             raise ValueError("width and height must be at least 16")
-        if self.fps <= 0 or self.fps > 240:
+        if self.width * self.height > MAX_FRAME_PIXELS:
+            raise ValueError("source geometry exceeds the bounded frame pixel budget")
+        if not math.isfinite(self.fps) or self.fps <= 0 or self.fps > 240:
             raise ValueError("fps must be in (0, 240]")
         if self.bitrate < 1:
             raise ValueError("bitrate must be positive")
