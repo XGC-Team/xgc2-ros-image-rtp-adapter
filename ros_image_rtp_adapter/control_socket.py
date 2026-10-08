@@ -4,6 +4,7 @@ from __future__ import annotations
 import secrets
 import socket
 import threading
+from functools import wraps
 from dataclasses import dataclass
 from typing import Dict
 
@@ -12,6 +13,23 @@ from ros_image_rtp_adapter.settings import MAX_FRAME_BYTES, MAX_FRAME_PIXELS
 from ros_image_rtp_adapter.frames import FrameValidationError, jpeg_geometry
 
 PROTOCOL_VERSION = 1
+
+
+def _domain_operation(method):
+    """Keep accepted native domain work owned after transport cancellation."""
+    @wraps(method)
+    def admitted(self, *args, **kwargs):
+        with self._admission:
+            if self._closing:
+                raise Fault("unavailable", "camera source is stopping")
+            self._domain_jobs += 1
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            with self._admission:
+                self._domain_jobs -= 1
+                self._admission.notify_all()
+    return admitted
 
 
 @dataclass(frozen=True)
@@ -83,6 +101,9 @@ class SourceControlServer:
         self._revision = 1
         self._transition = threading.Lock()
         self._capture_slots = threading.BoundedSemaphore(1)
+        self._admission = threading.Condition()
+        self._closing = False
+        self._domain_jobs = 0
         prefix = "/v1/media/sources/" + description.source_id
         self._host = Host(path, {
             ("GET", "/v1/describe"): self._discover,
@@ -109,7 +130,23 @@ class SourceControlServer:
         self._host.start()
 
     def stop(self):
+        self.begin_close()
+        self.wait_quiescent()
         self._host.close()
+
+    def begin_close(self):
+        """Reject new mutations while retaining the listener and its lease."""
+        with self._admission:
+            self._closing = True
+            self._desired_active = False
+
+    def wait_quiescent(self, timeout=5.0):
+        with self._admission:
+            if not self._admission.wait_for(lambda: self._domain_jobs == 0, timeout):
+                raise RuntimeError("source domain work did not quiesce; endpoint ownership retained")
+
+    def close_failed(self, error):
+        self._last_error = str(error)[:1024]
 
     @staticmethod
     def _request(request, allowed):
@@ -133,8 +170,10 @@ class SourceControlServer:
         healthy = active == bool(rtp.get("encoder_running", active))
         return {
             "ok": True, "source_id": self._description.source_id,
-            "state": (self._phase or ("faulted" if not healthy or (
-                self._last_error and self._desired_active != active) else "active" if active else "idle")),
+            "state": (self._phase or ("faulted" if (
+                self._last_error and (self._desired_active != active or self._closing))
+                else "stopping" if self._closing else "faulted" if not healthy
+                else "active" if active else "idle")),
             "desired_active": self._desired_active, "applied_active": active,
             "configuration_revision": self._revision,
             "desired_revision": self._revision, "applied_revision": self._revision,
@@ -172,6 +211,7 @@ class SourceControlServer:
         finally:
             self._transition.release()
 
+    @_domain_operation
     def _configure(self, context, request):
         self._request(request, ("expected_revision", "persist", "config"))
         expected = request.get("expected_revision")
@@ -205,13 +245,15 @@ class SourceControlServer:
     def _stop_source(self, context, request):
         return self._set_active(context, request, False)
 
+    @_domain_operation
     def _set_active(self, context, request, active):
         self._request(request, ())
         if not self._transition.acquire(timeout=context.remaining()):
             raise Fault("deadline_exceeded", "source transition deadline exceeded")
         try:
             context.check_cancelled()
-            self._desired_active = active
+            if not self._closing:
+                self._desired_active = active
             if self._on_set_active is None:
                 raise Fault("unavailable", "source has no native encoder control")
             try:
@@ -234,6 +276,7 @@ class SourceControlServer:
             self._phase = ""
             self._transition.release()
 
+    @_domain_operation
     def _keyframe(self, context, request):
         self._request(request, ())
         if not self._transition.acquire(timeout=context.remaining()):
@@ -247,6 +290,7 @@ class SourceControlServer:
         finally:
             self._transition.release()
 
+    @_domain_operation
     def _capture(self, context, request):
         self._request(request, ("snapshotId", "includeRgb", "requireFresh", "requestKeyframe"))
         include_rgb = request.get("includeRgb", True)
@@ -296,6 +340,9 @@ class SourceControlServer:
                     or capture.timestamp_clock_domain not in {
                         "simulation", "system_realtime", "monotonic", "device", "unknown"}):
                 raise Fault("internal", "capture provider returned invalid source identity")
+            if ((width, height) != (self._description.width, self._description.height)
+                    or capture.frame_id != self._description.frame_id):
+                raise Fault("internal", "captured frame differs from frozen source geometry or frame identity")
             metadata = {
                 "ok": True, "snapshotId": snapshot_id, "sourceId": self._description.source_id,
                 "jpegBytes": len(jpeg), "rgbBytes": len(rgb), "width": width, "height": height,

@@ -24,7 +24,8 @@ def test_real_xrpc_start_capture_rtp_and_reaped_stop(tmp_path, backend, input_ty
         settings = AdapterSettings.from_mapping({"source_id": "native", "control_socket": str(tmp_path / "n.sock"),
             "width": 320, "height": 180, "fps": 10.0, "bitrate": 800000,
             "encoder_backend": backend, "input_message_type": input_type, "raw_encoding": "rgb8",
-            "rtp_port": receiver.getsockname()[1], "source_clock_domain": "device"})
+            "rtp_port": receiver.getsockname()[1], "source_clock_domain": "device",
+            "frame_id": "native_optical"})
         source = ImageRtpAdapterRuntime(settings)
         source.start()
         prefix = "/v1/media/sources/native/"

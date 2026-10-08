@@ -15,6 +15,7 @@ import re
 import signal
 import subprocess
 import threading
+import time
 from typing import Callable, Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 from ros_image_rtp_adapter.h264 import AnnexBAccessUnits
@@ -107,33 +108,62 @@ def packed_frame_bytes(input_format: str, width: int, height: int) -> int:
 class SubprocessEncoder:
     """Supervised stdin-fed encoder subprocess.
 
-    ``_state_lock`` only guards the process handle. Writers serialize on
-    ``_write_lock`` and never hold ``_state_lock`` while blocked in a pipe
-    write, so ``stop()`` can always terminate a stalled encoder (which also
-    unblocks the writer) instead of waiting behind it.
+    Native ownership ends only after the child is reaped and its writers and
+    output readers have exited. Lifecycle changes serialize separately from
+    pipe writes, so stop can terminate a stalled child before waiting for the
+    writer that the termination releases.
     """
 
     def __init__(self) -> None:
         self._proc: Optional[subprocess.Popen] = None
         self._state_lock = threading.Lock()
+        self._lifecycle_lock = threading.Lock()
         self._write_lock = threading.Lock()
+        self._stopping = False
+        self._stop_generation = 0
+        self._readers: List[threading.Thread] = []
         self._runtime_validated = False
         self._stderr_tail = deque(maxlen=20)
 
     @property
     def running(self) -> bool:
-        proc = self._proc
-        return proc is not None and proc.poll() is None
+        with self._state_lock:
+            proc = self._proc
+            return proc is not None and proc.poll() is None
+
+    @property
+    def stopped(self) -> bool:
+        """Whether all owned native work has actually quiesced.
+
+        A dead child can still have a blocked writer or an output callback.
+        ``running == False`` therefore does not establish stop completion.
+        """
+
+        with self._state_lock:
+            return self._proc is None and not self._readers and not self._stopping
 
     @property
     def diagnostic(self) -> str:
         return "\n".join(self._stderr_tail)
 
     def start(self) -> None:
-        with self._state_lock:
-            if self._proc is not None:
-                return
-            self._launch_locked()
+        # A start concurrent with stop must not queue behind it and silently
+        # allocate a replacement child immediately after stop completes.
+        if not self._lifecycle_lock.acquire(blocking=False):
+            raise RuntimeError("encoder lifecycle transition is in progress")
+        try:
+            with self._state_lock:
+                if self._stopping:
+                    raise RuntimeError("encoder stop has not completed; retry stop first")
+                proc = self._proc
+                if proc is None:
+                    self._launch_locked()
+                    return
+                if proc.poll() is None:
+                    return
+            self._restart_locked(proc)
+        finally:
+            self._lifecycle_lock.release()
 
     def preflight(self) -> None:
         """Validate the configured backend without allocating an encoder."""
@@ -146,15 +176,32 @@ class SubprocessEncoder:
 
     def stop(self) -> None:
         with self._state_lock:
-            proc = self._proc
-            self._proc = None
-        self._stop_process(proc)
+            self._stopping = True
+            self._stop_generation += 1
+            generation = self._stop_generation
+        deadline = time.monotonic() + 5.0
+        if not self._lifecycle_lock.acquire(timeout=self._remaining(deadline)):
+            raise RuntimeError("encoder lifecycle did not quiesce before stop deadline")
+        try:
+            with self._state_lock:
+                proc = self._proc
+            if proc is not None:
+                self._finish_stop(proc, deadline)
+            with self._state_lock:
+                self._proc = None
+                self._readers.clear()
+                if self._stop_generation == generation:
+                    self._stopping = False
+        finally:
+            self._lifecycle_lock.release()
 
     def write_frame(self, frame: bytes, source_stamp_ns: Optional[int] = None) -> None:
+        failed_proc = None
         with self._write_lock:
-            proc = self._proc
-            if proc is None or proc.stdin is None:
-                return
+            with self._state_lock:
+                proc = self._proc
+                if self._stopping or proc is None or proc.stdin is None:
+                    return
             self._before_write(source_stamp_ns)
             try:
                 remaining = memoryview(frame)
@@ -165,11 +212,12 @@ class SubprocessEncoder:
                     remaining = remaining[written:]
                 proc.stdin.flush()
             except (BrokenPipeError, OSError, ValueError):
-                # ValueError: stop() closed stdin while this write was blocked.
-                with self._state_lock:
-                    # Only a crashed *current* encoder restarts; a stopped one stays stopped.
-                    if self._proc is proc:
-                        self._restart_locked()
+                failed_proc = proc
+        # Never wait for lifecycle ownership while holding the write lock:
+        # stop holds lifecycle ownership while joining the released writer.
+        if failed_proc is not None:
+            with self._lifecycle_lock:
+                self._restart_locked(failed_proc)
 
     def _before_write(self, source_stamp_ns: Optional[int]) -> None:
         """Hook run under the write lock before a frame reaches the live process."""
@@ -195,10 +243,16 @@ class SubprocessEncoder:
     def _on_launched(self, proc: subprocess.Popen) -> None:
         """Hook run once ``proc`` is the current process (output readers)."""
 
+    def _start_reader_locked(self, proc: subprocess.Popen, target, name: str) -> None:
+        reader = threading.Thread(target=target, args=(proc,), daemon=True, name=name)
+        self._readers.append(reader)
+        reader.start()
+
     def _launch_locked(self) -> None:
         if not self._runtime_validated:
             self.validate_runtime()
             self._runtime_validated = True
+        self._before_launch()
         proc = subprocess.Popen(
             self._build_command(),
             stdin=subprocess.PIPE,
@@ -207,46 +261,90 @@ class SubprocessEncoder:
             bufsize=0,
         )
         self._stderr_tail.clear()
-        self._before_launch()
         self._proc = proc
-        self._on_launched(proc)
-        threading.Thread(target=self._drain_stderr, args=(proc,), daemon=True).start()
+        try:
+            self._start_reader_locked(proc, self._drain_stderr, "encoder-stderr")
+            self._on_launched(proc)
+        except BaseException:
+            # A launch hook can fail after Popen has allocated native work.
+            # The caller must stop this retained child before trying again.
+            self._stopping = True
+            raise
 
-    def _restart_locked(self) -> None:
-        proc = self._proc
-        self._proc = None
-        self._stop_process(proc, wait=False)
-        self._launch_locked()
+    def _restart_locked(self, proc: subprocess.Popen) -> None:
+        """Restart a failed current child while holding lifecycle ownership."""
+
+        with self._state_lock:
+            if self._proc is not proc or self._stopping:
+                return
+            generation = self._stop_generation
+            self._stopping = True
+        self._finish_stop(proc, time.monotonic() + 5.0)
+        with self._state_lock:
+            self._proc = None
+            self._readers.clear()
+            if self._stop_generation != generation:
+                # A concurrent stop owns the next transition; do not replace
+                # the child it has requested to stop.
+                return
+            self._stopping = False
+            self._launch_locked()
 
     @staticmethod
-    def _stop_process(proc: Optional[subprocess.Popen], *, wait: bool = True) -> None:
-        if proc is None:
-            return
+    def _remaining(deadline: float) -> float:
+        return max(0.0, deadline - time.monotonic())
+
+    def _finish_stop(self, proc: subprocess.Popen, deadline: float) -> None:
+        self._stop_process(proc, deadline=deadline)
+        if not self._write_lock.acquire(timeout=self._remaining(deadline)):
+            raise RuntimeError("encoder writer did not quiesce before stop deadline")
+        self._write_lock.release()
+        for reader in self._readers:
+            if reader is threading.current_thread():
+                raise RuntimeError("encoder output callback cannot join its own reader")
+            # Thread.start itself may have failed after ownership was recorded.
+            if reader.ident is not None:
+                reader.join(timeout=self._remaining(deadline))
+            if reader.is_alive():
+                raise RuntimeError("encoder output reader did not quiesce before stop deadline")
+        for pipe in (proc.stdin, proc.stdout, proc.stderr):
+            if pipe is not None:
+                self._close_pipe(pipe)
+
+    @staticmethod
+    def _close_pipe(pipe) -> None:
         try:
-            if proc.stdin:
-                proc.stdin.close()
-        except (OSError, ValueError):
-            pass
+            pipe.close()
+        except (OSError, ValueError) as exc:
+            if not pipe.closed:
+                raise RuntimeError("encoder pipe could not be closed") from exc
+
+    @staticmethod
+    def _stop_process(proc: subprocess.Popen, *, deadline: float) -> None:
+        # Terminate before touching the write lock or closing stdin: a pipe
+        # write may be blocked inside native I/O and needs the child to exit.
         if proc.poll() is None:
             try:
                 proc.send_signal(signal.SIGTERM)
-                if wait:
-                    proc.wait(timeout=3)
-                else:
-                    # Restart is already handling a failed producer. Reap it
-                    # promptly so bad input cannot accumulate old children.
-                    proc.kill()
-            except OSError:
-                pass
-            except subprocess.TimeoutExpired:
-                try:
-                    proc.kill()
-                except OSError:
-                    pass
+            except OSError as exc:
+                if proc.poll() is None:
+                    raise RuntimeError("encoder child could not be terminated") from exc
+        if proc.stdin is not None:
+            SubprocessEncoder._close_pipe(proc.stdin)
         try:
-            proc.wait(timeout=1)
-        except (OSError, subprocess.TimeoutExpired):
-            pass
+            proc.wait(timeout=min(3.0, SubprocessEncoder._remaining(deadline)))
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except OSError as exc:
+                if proc.poll() is None:
+                    raise RuntimeError("encoder child could not be killed") from exc
+            try:
+                proc.wait(timeout=SubprocessEncoder._remaining(deadline))
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                raise RuntimeError("encoder child was not reaped before stop deadline") from exc
+        except OSError as exc:
+            raise RuntimeError("encoder child could not be reaped") from exc
 
     def _drain_stderr(self, proc: subprocess.Popen) -> None:
         if proc.stderr is None:
@@ -480,8 +578,7 @@ class FFmpegH264PreviewEncoder(SubprocessEncoder):
             self._source_stamps.clear()
 
     def _on_launched(self, proc: subprocess.Popen) -> None:
-        threading.Thread(target=self._drain_access_units, args=(proc,), daemon=True,
-                         name="h264-preview-output").start()
+        self._start_reader_locked(proc, self._drain_access_units, "h264-preview-output")
 
     def _build_command(self) -> List[str]:
         command = [
@@ -516,7 +613,7 @@ class FFmpegH264PreviewEncoder(SubprocessEncoder):
 
         def emit(unit):
             with self._metadata_lock:
-                if self._proc is not proc:
+                if self._proc is not proc or self._stopping:
                     return
                 if not self._source_stamps:
                     raise RuntimeError("H264 output has no matching source timestamp")
@@ -526,7 +623,7 @@ class FFmpegH264PreviewEncoder(SubprocessEncoder):
                 callback(unit, stamp)
 
         try:
-            while self._proc is proc:
+            while self._proc is proc and not self._stopping:
                 data = proc.stdout.read(65536)
                 if not data:
                     break

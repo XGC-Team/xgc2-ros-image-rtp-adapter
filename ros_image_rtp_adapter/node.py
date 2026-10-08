@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import rclpy
 from rclpy.node import Node
+from rclpy.signals import SignalHandlerOptions
 from sensor_msgs.msg import CompressedImage, Image
 
-from ros_image_rtp_adapter.runtime import ImageRtpAdapterRuntime
+from ros_image_rtp_adapter.runtime import ImageRtpAdapterRuntime, finish_shutdown, shutdown_signal_owner
 from ros_image_rtp_adapter.settings import AdapterSettings, PARAMETER_DEFAULTS
 
 
 class ImageRtpAdapterNode(Node):
     def __init__(self) -> None:
         super().__init__("image_rtp_adapter")
+        self._destroyed = False
         for name, default in PARAMETER_DEFAULTS.items():
             self.declare_parameter(name, default)
 
@@ -33,6 +35,15 @@ class ImageRtpAdapterNode(Node):
             log_warning=self.get_logger().warning,
             log_error=self.get_logger().error,
         )
+        try:
+            self._initialize_runtime()
+        except BaseException:
+            # main has no node reference until __init__ returns. This frame
+            # owns self/context through every failed native cleanup attempt.
+            finish_shutdown(self.destroy_node, lambda message: self.get_logger().error(message))
+            raise
+
+    def _initialize_runtime(self) -> None:
         self._runtime.start()
 
         if self._settings.input_message_type == "compressed":
@@ -67,11 +78,17 @@ class ImageRtpAdapterNode(Node):
         )
 
     def destroy_node(self) -> bool:
+        if self._destroyed:
+            return True
         try:
             self._runtime.stop()
         except Exception as exc:
             self.get_logger().error(f"stop image RTP adapter runtime: {exc}")
-        return super().destroy_node()
+            return False
+        result = super().destroy_node()
+        if result:
+            self._destroyed = True
+        return result
 
     def _on_compressed_image(self, message: CompressedImage) -> None:
         self._runtime.submit_compressed(message.data, message.format,
@@ -96,15 +113,21 @@ class ImageRtpAdapterNode(Node):
 
 
 def main(args=None) -> None:
-    rclpy.init(args=args)
-    node = ImageRtpAdapterNode()
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
+    # ROS's default signal handler shuts the context down before user cleanup.
+    # This process owner keeps it alive through native stop/reap and retries.
+    rclpy.init(args=args, signal_handler_options=SignalHandlerOptions.NO)
+    with shutdown_signal_owner() as requested:
+        node = None
+        try:
+            node = ImageRtpAdapterNode()
+            while rclpy.ok() and not requested.is_set():
+                rclpy.spin_once(node, timeout_sec=0.1)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            if node is not None:
+                finish_shutdown(node.destroy_node, node.get_logger().error)
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

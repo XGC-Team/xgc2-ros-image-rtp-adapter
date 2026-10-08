@@ -1,4 +1,9 @@
 from unittest.mock import Mock, patch
+import subprocess
+import signal
+import sys
+import threading
+import time
 
 import pytest
 
@@ -6,6 +11,7 @@ from ros_image_rtp_adapter.encoder import (
     FFmpegH264PreviewEncoder,
     FFmpegRtpEncoder,
     GStreamerRtpEncoder,
+    SubprocessEncoder,
     create_h264_preview_encoder,
     create_rtp_encoder,
 )
@@ -342,3 +348,233 @@ def test_stop_releases_a_writer_blocked_on_a_stalled_encoder():
     assert not writer.is_alive()
     popen.assert_not_called()  # a stopped encoder is not restarted by the failed write
     assert encoder._proc is None
+
+
+class LocalProcessEncoder(SubprocessEncoder):
+    """A real pipe-fed child requiring no media backend or device."""
+
+    def __init__(self, code="import time; time.sleep(60)"):
+        super().__init__()
+        self.code = code
+        self.launches = 0
+        self.write_entered = threading.Event()
+
+    def validate_runtime(self):
+        pass
+
+    def _build_command(self):
+        return [sys.executable, "-u", "-c", self.code]
+
+    def _before_launch(self):
+        self.launches += 1
+
+    def _before_write(self, _stamp):
+        self.write_entered.set()
+
+
+def test_real_stalled_child_is_reaped_without_waiting_behind_its_writer():
+    encoder = LocalProcessEncoder()
+    encoder.start()
+    proc = encoder._proc
+    readers = list(encoder._readers)
+    writer = threading.Thread(target=encoder.write_frame, args=(b"x" * (8 * 1024 * 1024),))
+    try:
+        writer.start()
+        assert encoder.write_entered.wait(1)
+        assert writer.is_alive()  # The child never consumes its bounded pipe.
+        started = time.monotonic()
+        encoder.stop()
+        assert time.monotonic() - started < 2
+        writer.join(1)
+        assert not writer.is_alive()
+        assert proc.returncode is not None
+        assert encoder.stopped and not encoder.running
+        assert all(not reader.is_alive() for reader in readers)
+        assert encoder.launches == 1  # Interrupted write did not restart it.
+    finally:
+        encoder.stop()
+        writer.join(1)
+
+
+def test_real_child_ignoring_term_is_killed_and_reaped_before_stop_returns():
+    encoder = LocalProcessEncoder(
+        "import signal,sys,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "sys.stderr.write('ready\\n'); sys.stderr.flush(); time.sleep(60)"
+    )
+    encoder.start()
+    proc = encoder._proc
+    try:
+        deadline = time.monotonic() + 2
+        while "ready" not in encoder.diagnostic and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert "ready" in encoder.diagnostic
+        encoder.stop()
+        assert proc.returncode == -signal.SIGKILL
+        assert encoder.stopped and encoder._proc is None
+    finally:
+        encoder.stop()
+
+
+def test_final_reap_failure_retains_owner_and_blocks_start_until_retry():
+    encoder = LocalProcessEncoder()
+    encoder.start()
+    proc = encoder._proc
+    try:
+        with patch.object(proc, "wait", side_effect=subprocess.TimeoutExpired(proc.args, 0)):
+            with pytest.raises(RuntimeError, match="not reaped"):
+                encoder.stop()
+            assert encoder._proc is proc
+            assert not encoder.stopped
+            with pytest.raises(RuntimeError, match="retry stop"):
+                encoder.start()
+            encoder.write_frame(b"ignored while stopping")
+            assert encoder.launches == 1
+        encoder.stop()
+        assert proc.returncode is not None
+        assert encoder._proc is None and encoder.stopped
+    finally:
+        encoder.stop()
+
+
+def test_restart_reaps_old_native_owner_and_readers_before_replacement():
+    encoder = LocalProcessEncoder()
+    encoder.start()
+    proc = encoder._proc
+    readers = list(encoder._readers)
+    try:
+        proc.stdin.close()  # The still-live child makes the next write fail.
+        encoder.write_frame(b"frame")
+        assert proc.returncode is not None
+        assert all(not reader.is_alive() for reader in readers)
+        assert encoder._proc is not proc and encoder.running
+        assert encoder.launches == 2
+    finally:
+        encoder.stop()
+
+
+def test_restart_reap_failure_never_allocates_a_second_child():
+    encoder = LocalProcessEncoder()
+    encoder.start()
+    proc = encoder._proc
+    try:
+        proc.stdin.close()
+        with patch.object(proc, "wait", side_effect=OSError("injected wait failure")):
+            with pytest.raises(RuntimeError, match="could not be reaped"):
+                encoder.write_frame(b"frame")
+            assert encoder._proc is proc and not encoder.stopped
+            assert encoder.launches == 1
+        encoder.stop()
+        assert encoder.stopped
+    finally:
+        encoder.stop()
+
+
+def test_start_during_real_child_stop_is_rejected_even_after_child_exit():
+    encoder = LocalProcessEncoder()
+    encoder.start()
+    proc = encoder._proc
+    wait_entered, wait_release = threading.Event(), threading.Event()
+    wait = proc.wait
+    errors = []
+
+    def held_wait(*args, **kwargs):
+        wait_entered.set()
+        assert wait_release.wait(2)
+        return wait(*args, **kwargs)
+
+    def stop():
+        try:
+            encoder.stop()
+        except BaseException as exc:
+            errors.append(exc)
+
+    stopper = threading.Thread(target=stop)
+    try:
+        with patch.object(proc, "wait", side_effect=held_wait):
+            stopper.start()
+            assert wait_entered.wait(1)
+            # Reaping the child does not release encoder ownership while stop
+            # is still working on readers and writer completion.
+            assert wait(timeout=1) is not None
+            assert not encoder.running and not encoder.stopped
+            with pytest.raises(RuntimeError, match="transition"):
+                encoder.start()
+            assert encoder.launches == 1
+            wait_release.set()
+            stopper.join(2)
+        assert not stopper.is_alive() and not errors
+        assert encoder.stopped
+    finally:
+        wait_release.set()
+        stopper.join(2)
+        encoder.stop()
+
+
+def test_preview_callback_completion_is_required_even_after_child_reap():
+    class LocalPreview(FFmpegH264PreviewEncoder):
+        def validate_runtime(self):
+            pass
+
+        def _build_command(self):
+            return [sys.executable, "-u", "-c", (
+                "import sys,time; sys.stdin.buffer.read(1); "
+                "sys.stdout.buffer.write(b'\\x00\\x00\\x00\\x01\\x09\\xf0'"
+                "b'\\x00\\x00\\x00\\x01\\x65payload'"
+                "b'\\x00\\x00\\x00\\x01\\x09\\xf0'); "
+                "sys.stdout.buffer.flush(); time.sleep(60)"
+            )]
+
+    encoder = LocalPreview(
+        ffmpeg_path="unused", source_width=2, source_height=2,
+        width=2, height=2, fps=1, bitrate=1000,
+    )
+    entered, release = threading.Event(), threading.Event()
+    emitted = []
+
+    def callback(unit, stamp):
+        emitted.append((unit, stamp))
+        entered.set()
+        assert release.wait(3)
+
+    encoder.set_access_unit_callback(callback)
+    encoder.start()
+    proc = encoder._proc
+    readers = list(encoder._readers)
+    remaining = encoder._remaining
+    try:
+        encoder.write_frame(b"x", 123)
+        assert entered.wait(1)
+        with patch.object(encoder, "_remaining", side_effect=lambda end: min(remaining(end), 0.05)):
+            with pytest.raises(RuntimeError, match="reader did not quiesce"):
+                encoder.stop()
+        assert proc.returncode is not None and not encoder.running
+        assert encoder._proc is proc and not encoder.stopped
+        assert any(reader.is_alive() for reader in readers)
+        with pytest.raises(RuntimeError, match="retry stop"):
+            encoder.start()
+        release.set()
+        encoder.stop()
+        assert encoder.stopped and all(not reader.is_alive() for reader in readers)
+        assert len(emitted) == 1 and emitted[0][1] == 123
+    finally:
+        release.set()
+        encoder.stop()
+
+
+def test_reader_launch_failure_keeps_native_owner_for_stop():
+    class FailingReaderEncoder(LocalProcessEncoder):
+        def _on_launched(self, _proc):
+            raise RuntimeError("injected reader launch failure")
+
+    encoder = FailingReaderEncoder()
+    try:
+        with pytest.raises(RuntimeError, match="reader launch failure"):
+            encoder.start()
+        proc = encoder._proc
+        assert proc is not None and not encoder.stopped
+        with pytest.raises(RuntimeError, match="retry stop"):
+            encoder.start()
+        encoder.stop()
+        assert proc.returncode is not None and encoder.stopped
+    finally:
+        encoder.stop()

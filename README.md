@@ -60,10 +60,13 @@ therefore never reuses a pre-request frame. JPEG-only snapshots return those
 exact camera bytes as `source-jpeg-passthrough`; Pillow validates JPEG geometry
 without re-encoding it. Raw input uses Pillow/libjpeg snapshot
 path only when that source mode is explicitly selected.
-Dimensions and raw encoding are explicit, fixed Session configuration; a
-mismatched message is rejected instead of silently changing the stream
-contract. Each received frame is encoded at most once, so a stopped ROS source
-also stops RTP rather than replaying the final frame forever.
+Dimensions, optical `frame_id`, and raw encoding are explicit, fixed Session
+configuration; a mismatched message is rejected instead of silently changing
+the stream contract. JPEG dimensions are checked before decoding; a nonempty
+ROS frame ID must match the configured optical identity. An empty header uses
+the explicit configured frame identity. Capture preserves the accepted frame's
+dimensions and identity. Each received frame is encoded at most once, so a
+stopped ROS source also stops RTP rather than replaying the final frame forever.
 
 The adapter starts inactive. Backend capabilities are preflighted during
 readiness, but the encoder process and any hardware encoder session are not
@@ -89,10 +92,23 @@ gRPC settings, unknown prefix variables and values above product ceilings fail
 startup explicitly; this product does not maintain a second environment resolver.
 
 `start` and `stop` report `completion:applied` only after native encoder state
-matches the request. A running encoder does not prove that a camera exists or
-images arrive; status exposes input/output/drop counters separately. These stdin
+matches the request. Stop retains applied activity until the child is reaped and
+its readers and writers finish. Process shutdown first closes domain admission,
+waits for accepted transitions/captures and encoder pumps, then releases the
+control endpoint lease. Native shutdown failure keeps the endpoint and owners
+for a stop retry; new mutations fail while status remains readable. A running
+encoder does not prove that a camera exists or images arrive; status exposes
+input/output/drop counters separately. These stdin
 encoder backends cannot force a live IDR. They advertise bounded GOP, omit the
 force-IDR capability, and return 501 `unsupported` for explicit keyframe requests.
+
+The ROS process owns graceful SIGINT/SIGTERM handling so the ROS context and
+publisher remain alive through native shutdown. ROS 2 destruction returns false
+on failed stop; its main owner retries before destroying the node or context.
+ROS 1's client shutdown hook retains the node and preview publisher until stop
+succeeds. Each native stop attempt is bounded; overall shutdown stays pending
+and retries while actual native work remains. An unrecoverable owner requires
+the process supervisor to terminate the service; it is never reported complete.
 Capture therefore defaults `requestKeyframe` to false.
 
 PATCH `config` takes `{expected_revision,persist:false,config}`. Loopback

@@ -5,12 +5,13 @@ from __future__ import annotations
 import rospy
 from sensor_msgs.msg import CompressedImage, Image
 
-from ros_image_rtp_adapter.runtime import ImageRtpAdapterRuntime
+from ros_image_rtp_adapter.runtime import ImageRtpAdapterRuntime, finish_shutdown, shutdown_signal_owner
 from ros_image_rtp_adapter.settings import AdapterSettings, PARAMETER_DEFAULTS
 
 
 class ImageRtpAdapterROS1Node:
     def __init__(self) -> None:
+        self._shutdown_started = False
         values = {
             name: rospy.get_param(f"~{name}", default)
             for name, default in PARAMETER_DEFAULTS.items()
@@ -35,8 +36,20 @@ class ImageRtpAdapterROS1Node:
             log_error=rospy.logerr,
             on_access_unit=self._publish_video if video_topic else None,
         )
+        try:
+            self._initialize_runtime()
+        except BaseException:
+            # A failed constructor has not transferred self to main yet.
+            # Keep self/publisher alive until accepted native callbacks finish.
+            self.shutdown()
+            raise
+
+    def _initialize_runtime(self) -> None:
+        video_topic = self._settings.video_topic
         self._runtime.start()
-        rospy.on_shutdown(self._runtime.stop)
+        # Noetic client hooks run before rospy destroys publishers, but rospy
+        # catches hook exceptions. Do not return from this hook on failed stop.
+        rospy.on_shutdown(self.shutdown)
 
         if self._settings.input_message_type == "compressed":
             self._subscription = rospy.Subscriber(
@@ -97,11 +110,12 @@ class ImageRtpAdapterROS1Node:
         )
 
     def _update_video_consumer(self, _event) -> None:
-        if self._video_publisher is not None and not rospy.is_shutdown():
+        if (self._video_publisher is not None and not self._shutdown_started
+                and not rospy.is_shutdown()):
             self._runtime.set_video_active(self._video_publisher.get_num_connections() > 0)
 
     def _publish_video(self, data: bytes, stamp_ns: int) -> None:
-        if rospy.is_shutdown() or self._video_publisher is None:
+        if self._shutdown_started or rospy.is_shutdown() or self._video_publisher is None:
             return
         message = self._video_message_type()
         message.timestamp = rospy.Time(stamp_ns // 1_000_000_000, stamp_ns % 1_000_000_000)
@@ -114,11 +128,28 @@ class ImageRtpAdapterROS1Node:
         for level, message in self._runtime.status_report():
             (rospy.logerr if level == "error" else rospy.loginfo)("status %s", message)
 
+    def shutdown(self) -> None:
+        self._shutdown_started = True
+        finish_shutdown(self._runtime.stop, rospy.logerr)
+
 
 def main() -> None:
-    rospy.init_node("image_rtp_adapter", anonymous=False)
-    ImageRtpAdapterROS1Node()
-    rospy.spin()
+    # Own graceful signals so neither local signal shutdown nor process exit
+    # can destroy the ROS publisher while its native preview callback is live.
+    with shutdown_signal_owner() as requested:
+        rospy.init_node("image_rtp_adapter", anonymous=False, disable_signals=True)
+        node = None
+        try:
+            node = ImageRtpAdapterROS1Node()
+            while not rospy.is_shutdown() and not requested.wait(0.1):
+                pass
+        except KeyboardInterrupt:
+            pass
+        finally:
+            if node is not None:
+                node.shutdown()
+            if not rospy.is_shutdown():
+                rospy.signal_shutdown("image RTP adapter native shutdown complete")
 
 
 if __name__ == "__main__":

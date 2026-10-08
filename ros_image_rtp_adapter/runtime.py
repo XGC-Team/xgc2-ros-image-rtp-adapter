@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
+import signal
 import threading
 import os
+import sys
 from xgc2_xrpc import Runtime, Fault, resolve_policy
 import time
 from typing import Callable, Deque, Dict, List, Optional, Tuple
@@ -32,6 +35,47 @@ EncoderFactory = Callable[..., SubprocessEncoder]
 MAX_QUEUED_BYTES = 64 << 20
 
 
+@contextmanager
+def shutdown_signal_owner():
+    """Request graceful close without letting ROS tear down its context first."""
+    requested = threading.Event()
+    previous = {}
+    def request_shutdown(_signum, _frame):
+        requested.set()
+    try:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous[signum] = signal.signal(signum, request_shutdown)
+        yield requested
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+def finish_shutdown(attempt, log_error):
+    """Retain the caller's ROS owners until bounded stop attempts really finish."""
+    while True:
+        try:
+            if attempt() is not False:
+                return
+            reason = "native shutdown has not completed"
+        except (Exception, KeyboardInterrupt) as error:
+            reason = str(error) or type(error).__name__
+        message = ("shutdown pending: %s; owners retained; retrying actual stop. "
+                   "If it cannot quiesce, the process owner must terminate the service." % reason)
+        try:
+            log_error(message)
+        except Exception:
+            try:
+                sys.stderr.write(message + "\n")
+            except Exception:
+                pass  # A broken diagnostic sink cannot release native ownership.
+        try:
+            time.sleep(0.1)
+        except KeyboardInterrupt:
+            # A second graceful signal cannot make retained native work vanish.
+            continue
+
+
 @dataclass(frozen=True)
 class _QueuedFrame:
     encoder_data: bytes
@@ -55,6 +99,7 @@ class _EncoderChannel:
         self.timestamped = timestamped
         self.pending: Deque[_QueuedFrame] = deque(maxlen=depth)
         self.active = False
+        self.stopping = False
         self.frames_out = 0
         self.frames_dropped = 0
         self.pending_bytes = 0
@@ -131,6 +176,8 @@ class ImageRtpAdapterRuntime:
         self._frame_condition = threading.Condition(self._lock)
         self._latest: Optional[_QueuedFrame] = None
         self._started = False
+        self._closing = False
+        self._lifecycle_lock = threading.RLock()
         self._pump_stop = threading.Event()
         self._frames_in = 0
         self._last_validation_warning = 0.0
@@ -181,7 +228,13 @@ class ImageRtpAdapterRuntime:
         return self._video.encoder if self._video is not None else None
 
     def start(self) -> None:
+        with self._lifecycle_lock:
+            self._start()
+
+    def _start(self) -> None:
         if self._started:
+            if self._closing:
+                raise RuntimeError("source shutdown is incomplete; retry stop before restarting")
             return
         # Fail Session readiness immediately for a missing binary, element, or
         # configured property, while leaving the actual encoders unallocated
@@ -189,10 +242,11 @@ class ImageRtpAdapterRuntime:
         for channel in self._channels:
             channel.encoder.preflight()
         prepare_default_control_directory(self.settings.control_socket, self.settings.source_id)
-        self._create_control()
         self._pump_stop.clear()
+        self._closing = False
         self._started = True
         try:
+            self._create_control()
             for channel in self._channels:
                 thread = threading.Thread(
                     target=self._run_channel_pump,
@@ -204,23 +258,43 @@ class ImageRtpAdapterRuntime:
                 thread.start()
             self._control.start()
         except Exception:
-            self._started = False
-            self._stop_pumps()
-            self._control.stop()
-            self._rpc_runtime.close()
-            self._control = self._rpc_runtime = None
+            self.stop()
             raise
 
     def stop(self) -> None:
-        if not self._started:
-            return
-        try:
-            self._control.stop()
-        finally:
-            self._stop_pumps()
-        self._rpc_runtime.close()
-        self._started = False
-        self._control = self._rpc_runtime = None
+        with self._lifecycle_lock:
+            if (not self._started and self._control is None and self._rpc_runtime is None
+                    and all(self._encoder_stopped(channel) for channel in self._channels)):
+                return
+            with self._frame_condition:
+                self._closing = True
+                self._frame_condition.notify_all()
+            try:
+                if self._control is not None:
+                    self._control.begin_close()
+                    self._control.wait_quiescent()
+                # The listener and its exclusive lease remain owned through
+                # every accepted transition, child reap and pump completion.
+                self._stop_pumps()
+                if self._control is not None:
+                    self._control.stop()
+                if self._rpc_runtime is not None:
+                    self._rpc_runtime.close()
+            except Exception as error:
+                if self._control is not None:
+                    self._control.close_failed(error)
+                raise
+            self._started = False
+            self._control = self._rpc_runtime = None
+
+    @staticmethod
+    def _encoder_stopped(channel: _EncoderChannel) -> bool:
+        # Real subprocess encoders declare completion beyond child.poll(),
+        # including retained writers/readers; small injected test encoders
+        # without subprocess ownership have only their running postcondition.
+        if hasattr(channel.encoder, "stopped"):
+            return channel.encoder.stopped
+        return not channel.encoder.running
 
     def _stop_pumps(self) -> None:
         self._pump_stop.set()
@@ -229,11 +303,19 @@ class ImageRtpAdapterRuntime:
         # Stop encoders before joining: terminating a stalled encoder is what
         # releases a pump blocked in its pipe write.
         for channel in self._channels:
-            self._deactivate(channel)
+            if not channel.transition_lock.acquire(timeout=5.0):
+                raise RuntimeError("encoder transition did not quiesce; runtime ownership retained")
+            try:
+                self._deactivate(channel)
+            finally:
+                channel.transition_lock.release()
         for channel in self._channels:
             thread = channel.thread
-            if thread is not None and thread is not threading.current_thread():
-                thread.join(timeout=5.0)
+            if thread is not None:
+                if thread is threading.current_thread():
+                    raise RuntimeError("encoder pump cannot join itself; runtime ownership retained")
+                if thread.ident is not None:
+                    thread.join(timeout=5.0)
                 if thread.is_alive():
                     raise RuntimeError("encoder pump did not quiesce; runtime ownership retained")
             channel.thread = None
@@ -257,22 +339,27 @@ class ImageRtpAdapterRuntime:
             candidate.validate()
         except (ValueError, TypeError) as error:
             raise Fault("invalid_argument", str(error)) from error
-        with self._rtp.transition_lock, self._rtp.lock:
+        with self._rtp.transition_lock:
             with self._lock:
-                if self._rtp.active or self._encoder.running:
+                if self._closing:
+                    raise Fault("unavailable", "camera source is stopping")
+                if self._rtp.active or self._rtp.stopping or not self._encoder_stopped(self._rtp):
                     raise Fault("conflict", "stop RTP source before applying configuration")
-            encoder = self._encoder_factory(backend=candidate.encoder_backend, **candidate.encoder_kwargs())
-            try:
-                encoder.preflight()
-            except Exception as error:
-                encoder.stop()
-                raise Fault("unavailable", "configured encoder preflight failed: %s" % error) from error
-            self._encoder.stop()
-            with self._frame_condition:
-                self._rtp.pending.clear()
-                self._rtp.pending_bytes = 0
-                self._encoder = self._rtp.encoder = encoder
-                self.settings = candidate
+            # Reject a live/stopping channel before waiting for its writer:
+            # shutdown must be able to terminate that child's blocked pipe.
+            with self._rtp.lock:
+                encoder = self._encoder_factory(backend=candidate.encoder_backend, **candidate.encoder_kwargs())
+                try:
+                    encoder.preflight()
+                except Exception as error:
+                    encoder.stop()
+                    raise Fault("unavailable", "configured encoder preflight failed: %s" % error) from error
+                self._encoder.stop()
+                with self._frame_condition:
+                    self._rtp.pending.clear()
+                    self._rtp.pending_bytes = 0
+                    self._encoder = self._rtp.encoder = encoder
+                    self.settings = candidate
 
     def request_keyframe(self):
         raise Fault("unsupported", "stdin encoder uses bounded GOP; force-IDR is unsupported", status=501)
@@ -288,14 +375,24 @@ class ImageRtpAdapterRuntime:
 
     def _deactivate(self, channel: _EncoderChannel) -> None:
         with self._frame_condition:
-            channel.active = False
+            channel.stopping = True
             channel.pending.clear()
             channel.pending_bytes = 0
         # Stopping never waits for the pump: terminating the process is what
         # releases a pump blocked in a pipe write to a stalled encoder.
         channel.encoder.stop()
-        if channel.encoder.running:
+        if not self._encoder_stopped(channel):
             raise RuntimeError("encoder did not stop; native ownership retained")
+        # A native stop unblocks a stalled pipe write. Applied inactivity waits
+        # for that actual pump call too, without blocking child termination.
+        if not channel.lock.acquire(timeout=5.0):
+            raise RuntimeError("encoder writer did not quiesce; runtime ownership retained")
+        try:
+            with self._frame_condition:
+                channel.active = False
+                channel.stopping = False
+        finally:
+            channel.lock.release()
 
     def set_active(self, active: bool) -> None:
         """Media Edge demand (WebRTC viewer, recording, or snapshot)."""
@@ -312,10 +409,12 @@ class ImageRtpAdapterRuntime:
         desired = bool(active)
         with channel.transition_lock:
             with self._frame_condition:
+                if desired and (self._closing or channel.stopping):
+                    raise Fault("unavailable", "camera source is stopping; complete stop before start")
                 if desired == channel.active:
-                    if channel.encoder.running == desired:
+                    if ((desired and channel.encoder.running)
+                            or (not desired and self._encoder_stopped(channel))):
                         return
-                    channel.active = False
             if desired:
                 with channel.lock:
                     try:
@@ -357,7 +456,8 @@ class ImageRtpAdapterRuntime:
             )
             # Both subprocess backends decode this JPEG. Bound decoded pixels
             # before it can enter their fixed input queues.
-            jpeg_geometry(frame, MAX_FRAME_PIXELS)
+            if jpeg_geometry(frame, MAX_FRAME_PIXELS) != (self.settings.width, self.settings.height):
+                raise FrameValidationError("JPEG dimensions do not match configured source geometry")
         except FrameValidationError as exc:
             self._warn_validation(str(exc))
             return False
@@ -402,6 +502,9 @@ class ImageRtpAdapterRuntime:
                                          frame_id=frame_id or self.settings.frame_id))
 
     def _enqueue(self, frame: _QueuedFrame) -> bool:
+        if frame.frame_id != self.settings.frame_id:
+            self._warn_validation("image frame_id does not match configured source identity")
+            return False
         if len(frame.frame_id.encode("utf-8")) > 256:
             self._warn_validation("image frame_id exceeds bounded source identity")
             return False
@@ -412,11 +515,13 @@ class ImageRtpAdapterRuntime:
             self._warn_validation("H264 preview requires a valid source image timestamp")
             return False
         with self._frame_condition:
+            if self._closing:
+                return False
             self._frames_in += 1
             frame = replace(frame, frame_sequence=self._frames_in)
             self._latest = frame
             for channel in self._channels:
-                if not channel.active:
+                if not channel.active or channel.stopping:
                     continue
                 while channel.pending and (len(channel.pending) == channel.pending.maxlen
                         or channel.pending_bytes + len(frame.encoder_data) > MAX_QUEUED_BYTES):
@@ -439,7 +544,7 @@ class ImageRtpAdapterRuntime:
     def _pump_channel(self, channel: _EncoderChannel) -> bool:
         with channel.lock:
             with self._lock:
-                if not channel.active or not channel.pending:
+                if not channel.active or channel.stopping or not channel.pending:
                     return False
                 frame = channel.pending.popleft()
                 channel.pending_bytes -= len(frame.encoder_data)
@@ -453,7 +558,7 @@ class ImageRtpAdapterRuntime:
             with self._frame_condition:
                 self._frame_condition.wait_for(
                     lambda: self._pump_stop.is_set()
-                    or (channel.active and bool(channel.pending))
+                    or (channel.active and not channel.stopping and bool(channel.pending))
                 )
                 if self._pump_stop.is_set():
                     return
@@ -461,7 +566,11 @@ class ImageRtpAdapterRuntime:
                 self._pump_channel(channel)
             except Exception as exc:
                 self._log_error(f"{channel.name} encoder frame pump failed: {exc}")
-                self._deactivate(channel)
+                try:
+                    self._set_channel_active(channel, False)
+                except Exception as error:
+                    self._log_error(f"{channel.name} encoder remains owned after stop failure: {error}")
+                    return
 
     def snapshot_jpeg(self) -> Optional[bytes]:
         jpeg, _rgb = self.snapshot_parts(False) or (None, None)
@@ -484,6 +593,8 @@ class ImageRtpAdapterRuntime:
                     min(2.0, 3.0 / float(self.settings.fps)),
                 )
                 while self._frames_in <= request_frame:
+                    if self._closing:
+                        return None
                     remaining = deadline - time.monotonic()
                     if remaining <= 0.0:
                         return None
@@ -533,10 +644,11 @@ class ImageRtpAdapterRuntime:
 
     def status(self) -> Dict[str, object]:
         with self._lock:
-            status: Dict[str, object] = {"frames_in": self._frames_in}
+            status: Dict[str, object] = {"frames_in": self._frames_in, "closing": self._closing}
             for channel in self._channels:
                 status[channel.name] = {
                     "active": channel.active,
+                    "stopping": channel.stopping,
                     "frames_out": channel.frames_out,
                     "frames_dropped": channel.frames_dropped,
                     "pending": len(channel.pending),
@@ -547,6 +659,7 @@ class ImageRtpAdapterRuntime:
         for channel in self._channels:
             entry = status[channel.name]
             entry["encoder_running"] = channel.encoder.running
+            entry["encoder_stopped"] = self._encoder_stopped(channel)
             entry["encoder_diagnostic"] = channel.encoder.diagnostic
         status["xrpc"] = {"effective_policy": self._xrpc_policy.snapshot()}
         if self._rpc_runtime is not None:

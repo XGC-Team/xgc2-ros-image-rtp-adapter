@@ -1,14 +1,17 @@
-from ros_image_rtp_adapter.runtime import ImageRtpAdapterRuntime
+from ros_image_rtp_adapter.runtime import ImageRtpAdapterRuntime, shutdown_signal_owner
 from ros_image_rtp_adapter.settings import AdapterSettings
 import threading
 import time
 from io import BytesIO
 from PIL import Image
+import pytest
+import os
+import signal
 
 
-def jpeg_frame(index=0):
+def jpeg_frame(index=0, *, width=16, height=16):
     output = BytesIO()
-    Image.new("RGB", (16, 16), ((index * 19) % 256, (index * 31) % 256,
+    Image.new("RGB", (width, height), ((index * 19) % 256, (index * 31) % 256,
                               (index * 53) % 256)).save(output, format="JPEG")
     return output.getvalue()
 
@@ -188,6 +191,64 @@ def test_started_runtime_pumps_each_arriving_frame_without_a_same_rate_poll_time
         runtime.stop()
 
 
+def test_pump_cannot_release_its_own_runtime_owner(tmp_path):
+    runtime, encoder = make_runtime(tmp_path)
+    observed = threading.Event()
+    errors = []
+    def fail_write(_frame):
+        raise RuntimeError("injected pump failure")
+    def stop_from_pump(_message):
+        try:
+            runtime.stop()
+        except RuntimeError as error:
+            errors.append(error)
+        observed.set()
+    encoder.write_frame = fail_write
+    runtime._log_error = stop_from_pump
+    runtime.start()
+    try:
+        runtime.set_active(True)
+        pump = runtime._rtp.thread
+        assert runtime.submit_compressed(jpeg_frame(), "jpeg")
+        assert observed.wait(1)
+        assert errors and "cannot join itself" in str(errors[0])
+        assert runtime._control is not None and runtime._rpc_runtime is not None
+        assert runtime._rtp.thread is pump
+        pump.join(1)
+        assert not pump.is_alive()
+        runtime.stop()
+        assert runtime._control is None and runtime._rtp.thread is None
+    finally:
+        runtime.stop()
+
+
+def test_unstarted_pump_is_cleaned_after_thread_start_failure(tmp_path, monkeypatch):
+    runtime, _encoder = make_runtime(tmp_path)
+    original_start = threading.Thread.start
+    def fail_pump_start(thread):
+        if thread.name == "image-rtp-encoder-pump":
+            raise RuntimeError("injected thread start failure")
+        original_start(thread)
+    with monkeypatch.context() as patch:
+        patch.setattr(threading.Thread, "start", fail_pump_start)
+        with pytest.raises(RuntimeError, match="thread start failure"):
+            runtime.start()
+    assert runtime._control is None and runtime._rpc_runtime is None
+    assert runtime._rtp.thread is None and not runtime._started
+    runtime.start()
+    runtime.stop()
+
+
+def test_graceful_signal_owner_requests_stop_and_restores_handlers():
+    original = {signum: signal.getsignal(signum) for signum in (signal.SIGINT, signal.SIGTERM)}
+    with shutdown_signal_owner() as requested:
+        assert not requested.is_set()
+        os.kill(os.getpid(), signal.SIGTERM)
+        assert requested.wait(0.2)
+        os.kill(os.getpid(), signal.SIGINT)  # A repeated graceful request does not detach owners.
+    assert {signum: signal.getsignal(signum) for signum in original} == original
+
+
 def make_preview_runtime(tmp_path, **overrides):
     values = {
         "source_id": "test",
@@ -246,7 +307,7 @@ def test_each_active_encoder_receives_every_kept_frame(tmp_path):
     runtime, rtp, preview, _created = make_preview_runtime(tmp_path)
     runtime.set_active(True)
     runtime.set_video_active(True)
-    jpeg = jpeg_frame()
+    jpeg = jpeg_frame(width=64, height=36)
 
     assert runtime.submit_compressed(jpeg, "jpeg", source_stamp_ns=10)
     assert runtime.pump()
@@ -259,20 +320,20 @@ def test_video_only_demand_leaves_the_rtp_queue_empty(tmp_path):
     runtime, rtp, preview, _created = make_preview_runtime(tmp_path)
     runtime.set_video_active(True)
 
-    assert runtime.submit_compressed(jpeg_frame(6), "jpeg", source_stamp_ns=10)
-    assert runtime.submit_compressed(jpeg_frame(7), "jpeg", source_stamp_ns=20)
+    assert runtime.submit_compressed(jpeg_frame(6, width=64, height=36), "jpeg", source_stamp_ns=10)
+    assert runtime.submit_compressed(jpeg_frame(7, width=64, height=36), "jpeg", source_stamp_ns=20)
     status = runtime.status()
     assert status["rtp"]["pending"] == 0 and status["rtp"]["frames_dropped"] == 0
     assert status["ros-preview"]["frames_dropped"] == 1
     assert runtime.pump()
     assert rtp.frames == []
-    assert preview.frames == [(jpeg_frame(7), 20)]
+    assert preview.frames == [(jpeg_frame(7, width=64, height=36), 20)]
 
 
 def test_h264_timestamp_follows_kept_source_after_input_drop(tmp_path):
     runtime, _rtp, preview, _created = make_preview_runtime(tmp_path)
     runtime.set_video_active(True)
-    jpeg = jpeg_frame()
+    jpeg = jpeg_frame(width=64, height=36)
     assert not runtime.submit_compressed(jpeg, "jpeg", source_stamp_ns=0)
     runtime.submit_compressed(jpeg, "jpeg", source_stamp_ns=10)
     runtime.submit_compressed(jpeg, "jpeg", source_stamp_ns=20)
