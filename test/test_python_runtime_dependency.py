@@ -1,5 +1,6 @@
-"""Deployment must reject Python 3.8, missing SDK and unowned pip installs."""
+"""Verify the released Python runtime, SDK provenance and native capabilities."""
 import importlib.util
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -11,10 +12,35 @@ preflight = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(preflight)
 
 
-def test_focal_python38_fails_before_importing_sdk(monkeypatch):
-    monkeypatch.setattr(preflight.sys, "version_info", (3, 8, 10))
-    with pytest.raises(RuntimeError, match="Focal/Noetic"):
+@pytest.fixture
+def installed_runtime(monkeypatch):
+    sdk = SimpleNamespace(
+        Runtime=SimpleNamespace(from_environment=lambda: None),
+        Host=object, Client=object,
+        Limits=SimpleNamespace(from_policy=lambda: None),
+        multipart=object, resolve_policy=object,
+    )
+    versions = {
+        "xgc2-xrpc": "0.1.0", "aiohttp": "3.10.11",
+        "httpx": "0.28.1", "httpcore": "1.0.9",
+    }
+    provenance = {"archive_info": {"hashes": {"sha256":
+        "8e505ab2366eed198dcd4343e758fed5b7936990b2a72ba635d73d81b195187c"}}}
+    monkeypatch.setattr(preflight.metadata, "version", versions.__getitem__)
+    monkeypatch.setattr(preflight.metadata, "distribution", lambda _name:
+        SimpleNamespace(read_text=lambda _path: json.dumps(provenance)))
+    monkeypatch.setattr(preflight.importlib, "import_module", lambda _name: sdk)
+    return sdk, provenance
+
+
+def test_python38_is_supported_but_older_python_is_rejected(monkeypatch, installed_runtime):
+    monkeypatch.setattr(preflight.sys, "version_info", (3, 7, 17))
+    with pytest.raises(RuntimeError, match="Python >=3.8"):
         preflight.check_runtime()
+    monkeypatch.setattr(preflight.sys, "version_info", (3, 8, 10))
+    sdk, versions = preflight.check_runtime()
+    assert sdk is installed_runtime[0]
+    assert versions["xgc2-xrpc"] == "0.1.0"
 
 
 def test_absent_distribution_cannot_pass_with_only_source_on_pythonpath(monkeypatch):
@@ -25,20 +51,13 @@ def test_absent_distribution_cannot_pass_with_only_source_on_pythonpath(monkeypa
         preflight.check_runtime()
 
 
-def test_sdk_without_debian_file_owner_cannot_enter_deb(tmp_path, monkeypatch):
-    module = tmp_path / "sdk.py"
-    module.write_text("# source-only SDK")
-    def unowned(*_args, **_kwargs):
-        raise preflight.subprocess.CalledProcessError(1, "dpkg-query")
-    monkeypatch.setattr(preflight.subprocess, "run", unowned)
-    with pytest.raises(preflight.subprocess.CalledProcessError):
-        preflight.debian_dependency(SimpleNamespace(__file__=str(module)))
+def test_sdk_with_different_wheel_provenance_is_rejected(installed_runtime):
+    installed_runtime[1]["archive_info"]["hashes"]["sha256"] = "0" * 64
+    with pytest.raises(RuntimeError, match="released image-owned wheel"):
+        preflight.check_runtime()
 
 
-def test_resolved_package_owner_is_version_locked(tmp_path, monkeypatch):
-    module = tmp_path / "sdk.py"
-    module.write_text("# installed SDK")
-    monkeypatch.setattr(preflight.subprocess, "run", lambda *_args, **_kwargs:
-        SimpleNamespace(stdout="test-sdk: %s\n" % module))
-    monkeypatch.setattr(preflight.subprocess, "check_output", lambda *_args, **_kwargs: "0.1.0-2")
-    assert preflight.debian_dependency(SimpleNamespace(__file__=str(module))) == "test-sdk (= 0.1.0-2)"
+def test_sdk_without_native_runtime_capability_is_rejected(installed_runtime):
+    installed_runtime[0].Runtime = object
+    with pytest.raises(RuntimeError, match="startup policy snapshots"):
+        preflight.check_runtime()

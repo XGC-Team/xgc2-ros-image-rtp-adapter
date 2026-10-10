@@ -231,7 +231,7 @@ docker run --rm \
     fi
 
     # ROS-neutral unit and real GStreamer RTP tests.
-    PYTHONPATH=/workspace/work/source python3 -m pytest \
+    PYTHONPATH="/workspace/work/source:${PYTHONPATH}" python3 -m pytest \
       /workspace/work/source/test/test_artifact_manifest.py \
       /workspace/work/source/test/test_control_socket.py \
       /workspace/work/source/test/test_encoder.py \
@@ -241,10 +241,10 @@ docker run --rm \
       /workspace/work/source/test/test_media_edge_source_roster.py \
       /workspace/work/source/test/test_preview_geometry.py \
       /workspace/work/source/test/test_runtime.py -q
-    PYTHONPATH=/workspace/work/source python3 -m pytest \
+    PYTHONPATH="/workspace/work/source:${PYTHONPATH}" python3 -m pytest \
       /workspace/work/source/test/test_source_control.py \
       /workspace/work/source/test/test_python_runtime_dependency.py -q
-    PYTHONPATH=/workspace/work/source \
+    PYTHONPATH="/workspace/work/source:${PYTHONPATH}" \
       python3 /workspace/work/source/scripts/integration_gstreamer_rtp.py
 
     mkdir -p /workspace/work/install-root
@@ -438,7 +438,7 @@ PY
         HOME=/root \
         LANG=C.UTF-8 \
         PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
-        PYTHONNOUSERSITE=1 \
+        PYTHONNOUSERSITE=1 PYTHONPATH=/workspace/work/sdk \
         EXPECTED_ADAPTER_PREFIX="/opt/ros/${ROS_DISTRO}" \
         MEDIA_EDGE_BINARY=/usr/bin/xgc-media-edge \
         ROS_DISTRO="${ROS_DISTRO}" \

@@ -310,7 +310,7 @@ config_b="$(env DOCKER_IMAGE= ROS_DISTRO=jazzy UBUNTU_CODENAME=noble \
 test "${config_a}" = "${config_b}"
 grep -Fq 'ros_distro=humble' <<<"${config_a}"
 grep -Fq 'ubuntu=jammy' <<<"${config_a}"
-grep -Fxq 'image=ghcr.io/xgc-team/xgc2-images/xgc2-build-jammy-ros-humble:1.0.0' <<<"${config_a}"
+grep -Fxq "image=$(python3 .xgc2/scripts/read_integration_lock.py --lock .xgc2/integration-lock.json --field rosImage --ros-distro humble --ubuntu jammy)" <<<"${config_a}"
 if env DOCKER_IMAGE= ROS_DISTRO=jazzy UBUNTU_CODENAME=noble \
     .xgc2/scripts/build_debs_in_docker.sh \
     "${contract_args[@]}" \
