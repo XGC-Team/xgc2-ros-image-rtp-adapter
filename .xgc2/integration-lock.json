@@ -6,8 +6,8 @@
     "version": "0.6.0-5"
   },
   "rosImages": {
-    "humble-jammy": "ghcr.io/xgc-team/xgc2-images/xgc2-build-jammy-ros-humble:1.0.0",
-    "jazzy-noble": "ghcr.io/xgc-team/xgc2-images/xgc2-build-noble-ros-jazzy:1.0.0",
-    "noetic-focal": "ghcr.io/xgc-team/xgc2-images/xgc2-build-focal-ros-noetic:1.0.0"
+    "humble-jammy": "ghcr.io/xgc-team/xgc2-images/xgc2-build-jammy-ros-humble@sha256:cd0e72e641f1ec925cf8b76132c14db595d3d790249f6a96b1e9aaa82c330d40",
+    "jazzy-noble": "ghcr.io/xgc-team/xgc2-images/xgc2-build-noble-ros-jazzy@sha256:ff6f60cd89a197f1aeed813e9aef31bf86b1ca0afb3dbdcfca6d792d1e165499",
+    "noetic-focal": "ghcr.io/xgc-team/xgc2-images/xgc2-build-focal-ros-noetic@sha256:81dd95d5958ea3e5dbd32acb58b93a26fdd35086e49c3ed1fc019ea915827c0d"
   }
 }
