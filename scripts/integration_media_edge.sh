@@ -217,6 +217,8 @@ log "starting xgc-media-edge"
 "${WORK}/xgc-media-edge" \
   -control-address "${EDGE_HTTP}" \
   -rpc-socket "${WORK}/media-edge-rpc.sock" \
+  -target-id local \
+  -mediamtx-runtime-dir "${WORK}/mediamtx" \
   -sources-config "${SOURCES_CONFIG}" \
   >"${WORK}/edge.log" 2>&1 &
 EDGE_PID=$!
