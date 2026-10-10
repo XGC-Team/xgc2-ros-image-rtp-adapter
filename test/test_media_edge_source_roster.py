@@ -152,7 +152,10 @@ def test_lab_source_mode_cannot_reuse_a_stale_media_edge_binary():
 
 def test_package_matrix_integrates_an_exact_installed_media_edge():
     script = DOCKER_BUILD_SCRIPT.read_text(encoding="utf-8")
-    integration_lock = json.loads(INTEGRATION_LOCK.read_text(encoding="utf-8"))
+    lock_spec = importlib.util.spec_from_file_location("integration_lock", READ_INTEGRATION_LOCK)
+    lock_reader = importlib.util.module_from_spec(lock_spec)
+    lock_spec.loader.exec_module(lock_reader)
+    integration_lock = lock_reader.load_lock(INTEGRATION_LOCK)
 
     assert "MEDIA_EDGE_REF" not in script
     assert "dc461a8d2b9a1718fdd7616ce93a52d8dbc326ba" not in script
@@ -163,11 +166,7 @@ def test_package_matrix_integrates_an_exact_installed_media_edge():
             "sourceSha": "bf64868b8ff20bdacf4647536fa86bf15fc0bfa8",
             "version": "0.6.0-5",
         },
-        "rosImages": {
-            "humble-jammy": "ghcr.io/xgc-team/xgc2-images/xgc2-build-jammy-ros-humble:1.0.0",
-            "jazzy-noble": "ghcr.io/xgc-team/xgc2-images/xgc2-build-noble-ros-jazzy:1.0.0",
-            "noetic-focal": "ghcr.io/xgc-team/xgc2-images/xgc2-build-focal-ros-noetic:1.0.0",
-        },
+        "rosImages": lock_reader.ROS_IMAGES,
     }
     assert 'INTEGRATION_LOCK="${REPO_ROOT}/.xgc2/integration-lock.json"' in script
     assert '--field sourceSha' in script

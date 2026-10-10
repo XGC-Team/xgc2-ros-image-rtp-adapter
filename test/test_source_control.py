@@ -24,6 +24,11 @@ from ros_image_rtp_adapter.runtime import ImageRtpAdapterRuntime
 from ros_image_rtp_adapter.settings import AdapterSettings, MAX_FRAME_BYTES, prepare_default_control_directory
 
 
+@pytest.fixture(autouse=True)
+def private_runtime_directory(tmp_path):
+    tmp_path.chmod(0o700)
+
+
 class NativeEncoder:
     def __init__(self, **config):
         self.config, self.running, self.diagnostic = config, False, ""

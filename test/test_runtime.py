@@ -43,6 +43,7 @@ class FakeEncoder:
 
 
 def make_runtime(tmp_path, **overrides):
+    tmp_path.chmod(0o700)
     values = {
         "source_id": "test",
         "control_socket": str(tmp_path / "source.sock"),
@@ -250,6 +251,7 @@ def test_graceful_signal_owner_requests_stop_and_restores_handlers():
 
 
 def make_preview_runtime(tmp_path, **overrides):
+    tmp_path.chmod(0o700)
     values = {
         "source_id": "test",
         "control_socket": str(tmp_path / "video.sock"),
