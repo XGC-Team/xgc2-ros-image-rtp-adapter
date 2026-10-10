@@ -163,8 +163,8 @@ def test_package_matrix_integrates_an_exact_installed_media_edge():
         "schema": "xgc2.integration-lock/v1",
         "mediaEdge": {
             "repository": "https://github.com/lxk36/xgc2-media-edge.git",
-            "sourceSha": "bf64868b8ff20bdacf4647536fa86bf15fc0bfa8",
-            "version": "0.6.0-5",
+            "sourceSha": "cb35912dcbbe7dcca3ed371150bc269042f9678e",
+            "version": "0.6.0-11",
         },
         "rosImages": lock_reader.ROS_IMAGES,
     }

@@ -568,7 +568,8 @@ def test_runtime_shutdown_releases_real_blocked_pump_before_endpoint(tmp_path):
         pump = source._rtp.thread
         readers = list(encoder._readers)
         frame = bytes(256 * 256 * 3)
-        capacity = fcntl.fcntl(child.stdin.fileno(), fcntl.F_GETPIPE_SZ)
+        # Linux UAPI F_GETPIPE_SZ is 1032; Python 3.8 does not export its name.
+        capacity = fcntl.fcntl(child.stdin.fileno(), 1032)
         assert len(frame) > capacity
         assert source.submit_raw(frame, width=256, height=256, step=256 * 3, encoding="rgb8")
         assert encoder.write_entered.wait(1)
