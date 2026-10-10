@@ -201,8 +201,18 @@ docker run --rm \
     set +u
     source /opt/ros/${ROS_DISTRO}/setup.bash
     set -u
-    # Validate the real interpreter and installed shared SDK before compiling.
-    # A source checkout on PYTHONPATH does not satisfy package deployment.
+    # First-party official SDK; third-party modules remain image-owned.
+    sdk_wheel=/workspace/work/xgc2_xrpc-0.1.0-py3-none-any.whl
+    curl -fsSL --retry 5 \
+      https://github.com/XGC-Team/xgc2-xrpc/releases/download/v0.1.0-1/xgc2_xrpc-0.1.0-py3-none-any.whl \
+      -o "$sdk_wheel"
+    echo "8e505ab2366eed198dcd4343e758fed5b7936990b2a72ba635d73d81b195187c  $sdk_wheel" | sha256sum -c -
+    rm -rf /workspace/work/sdk
+    python3 -m zipfile -e "$sdk_wheel" /workspace/work/sdk
+    printf "%s\n" "{\"url\":\"https://github.com/XGC-Team/xgc2-xrpc/releases/download/v0.1.0-1/xgc2_xrpc-0.1.0-py3-none-any.whl\",\"archive_info\":{\"hashes\":{\"sha256\":\"8e505ab2366eed198dcd4343e758fed5b7936990b2a72ba635d73d81b195187c\"}}}" \
+      > /workspace/work/sdk/xgc2_xrpc-0.1.0.dist-info/direct_url.json
+    export PYTHONPATH="/workspace/work/sdk:${PYTHONPATH:-}"
+    # Verify the released wheel identity and image-owned runtime capabilities.
     python3 /workspace/work/source/.xgc2/scripts/check_python_runtime.py
     if [[ "${ROS_DISTRO}" == "noetic" ]]; then
       mkdir -p /workspace/work/catkin/src

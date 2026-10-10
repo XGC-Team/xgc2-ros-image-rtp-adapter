@@ -180,19 +180,11 @@ sudo apt install ros-jazzy-xgc2-ros-image-rtp-adapter
 Packages include the portable FFmpeg/GStreamer dependencies. NVIDIA plugins
 and GPU device access belong to the Agent container/runtime image.
 
-This XRPC revision requires Python >=3.10 and the installed shared
-`xgc2-xrpc==0.1.0` distribution (aiohttp 3.14.4, HTTPX 0.28.1, httpcore 1.0.9).
-The package gate resolves the SDK's real Debian file owner and pins that exact
-package dependency; a source checkout or pip-only build dependency cannot produce
-a deployable DEB. The approved ROS build images and SDK Debian publication still
-need to satisfy this gate. Noetic/Focal's default Python 3.8 cannot run this
-revision; its replacement runtime/image is unresolved. No PPA or older aiohttp
-version is substituted to claim Focal support.
-
-The current SDK is a candidate, and its `0.1.0` distribution label is not an
-immutable published ABI. Preflight checks the actual native/policy API and emits
-the installed package versions and SDK source SHA256 in a build receipt. Product
-and SDK publication still need coordinated immutable pins and deployment proof.
+The runtime requires Python >=3.8 and the installed shared
+`xgc2-xrpc==0.1.0` distribution. The released runtime image owns the SDK wheel
+and its dependency lock (aiohttp 3.10.11, HTTPX 0.28.1, httpcore 1.0.9).
+Noetic/Focal uses `/usr/bin/python3`; the adapter does not install a private SDK
+or substitute a different interpreter.
 
 ## Run
 

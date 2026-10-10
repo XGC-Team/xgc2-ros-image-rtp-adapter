@@ -15,7 +15,7 @@ setup(
         ("share/" + package_name + "/config", glob("config/*.yaml")),
     ],
     install_requires=["setuptools", "xgc2-xrpc==0.1.0"],
-    python_requires=">=3.10",
+    python_requires=">=3.8",
     zip_safe=True,
     maintainer="XGC2",
     maintainer_email="apt@xgc2.local",
